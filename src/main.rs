@@ -1,5 +1,11 @@
 /* Teamech Server v0.3
  * August 2018
+ * License: GPL v3.0
+ *
+ * This source code is provided with ABSOLUTELY NO WARRANTY. You are fully responsible for any
+ * operations that your computers carry out as a result of running this code or anything derived
+ * from it. The developer assumes the full absolution of liability described in the GPL v3.0
+ * license.
  *
  * OVERVIEW
  * Teamech is a simple, low-bandwidth supervisory control and data relay system intended for
