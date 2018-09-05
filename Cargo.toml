@@ -1,0 +1,8 @@
+[package]
+name = "teamech-server"
+version = "0.1.0"
+authors = ["ellie"]
+
+[dependencies]
+tiny-keccak = "1.4.2"
+rand = "0.3"
