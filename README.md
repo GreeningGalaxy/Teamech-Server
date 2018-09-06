@@ -120,7 +120,7 @@ to elsewhere as a pad file. In theory, any file will work as a pad file, but for
 the pad file should be generated using a secure random number generator, and at least twice as large
 as the product of your expected average data throughput and expected pad lifetime (for instance, if
 you plan to send 10 kilobytes of data per day, and want to replace the pad with a new one every year,
-days, then a pad file of around 6 megabytes will suffice). There is no functional requirement to
+then a pad file of around 6 megabytes will suffice). There is no functional requirement to
 replace the pad file, but if your system operates in an area where having your traffic intercepted
 is likely, you should replace it at least this often. You should also replace the pad file for the 
 system immediately in the event that you lose track of one or more of the devices on your network 
