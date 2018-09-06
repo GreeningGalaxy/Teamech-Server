@@ -28,6 +28,7 @@
  * 0x01 START OF HEADING - Authentication request response; contains eight-byte authentication nonce
  *					  as payload.
  * 0x02 START OF TEXT - Authentication success. Password/nonce hash received matched correct value.
+ * 0x03 END OF TEXT - Sent to a client instead of ACK when that client is the only one connected.
  * 0x06 ACK - Generic acknowledge - Packet was successfully rebroadcast to other subscribers.
  * 0x15 NAK - Generic refusal - Packet was invalid (e.g. bad signature or timestamp) or inappropriate.
  * 0x16 SYNCHRONOUS IDLE -	Response to client sending the same; indicates that the client's
@@ -51,12 +52,11 @@ use std::error::Error;
 use std::io;
 use std::io::prelude::*;
 use std::net::{UdpSocket,SocketAddr,IpAddr};
-use std::collections::{HashMap,HashSet};
+use std::collections::{HashMap,HashSet,VecDeque};
 use std::fs;
 use std::path::Path;
 
 // Default Parameters
-static CONNECT_TIMEOUT:u64 = 300_000;	// Maximum amount of time a client can remain inactive before being automatically unsubscribed
 static MAX_PACKET_DELAY:u64 = 10_000;   // Maximum amount of time in the past a packet's timestamp can be in order to validate.
 
 // systime function; gets the unixtime in milliseconds.
@@ -99,7 +99,7 @@ fn bytes2int(b:&[u8;8]) -> u64 {
 // bytes2hex converts a vector of bytes into a hexadecimal string. This is used mainly for
 // // debugging, when printing a binary string.
 fn bytes2hex(v:&Vec<u8>) -> String {
-	let mut result:String = String::from("0x");
+	let mut result:String = String::from("");
 	for x in 0..v.len() {
 		if v[x] == 0x00 {
 			result.push_str(&format!("00"));
@@ -107,6 +107,9 @@ fn bytes2hex(v:&Vec<u8>) -> String {
 			result.push_str(&format!("0{:x?}",v[x]));
 		} else {
 			result.push_str(&format!("{:x?}",v[x]));
+		}
+		if x < v.len()-1 {
+			result.push_str(" ");
 		}
 	}
 	return result;
@@ -271,37 +274,6 @@ fn sendbytes(listener:&UdpSocket,destaddr:&SocketAddr,bytes:&Vec<u8>) -> Result<
 	}
 }
 
-// Same as sendbytes, but loops until not only the send is successful, but also until a specific
-// payload is returned from the destination. There is both a timeout and a maximum number of tries
-// before which the function will give up and return an io::ErrorKind::NotFound error.
-fn sendbytesuntil(listener:&UdpSocket,destaddr:&SocketAddr,bytes:&Vec<u8>,target:&Vec<u8>,timeout:&u32,tries:&u32) -> Result<(),io::Error> {
-	let mut inbin:[u8;500] = [0;500];
-	'trier:for _x in 0..*tries {
-		// Attempt to send bytes normally; if an error is raised, propagate it and exit.
-		match sendbytes(&listener,&destaddr,&bytes) {
-			Ok(()) => (),
-			Err(e) => return Err(e),
-		};
-		// Wait for a payload to be received from the destination address. 
-		sleep(Duration::new(0,(timeout/tries)*1_000_000));
-		match listener.recv_from(&mut inbin) {
-			Ok((nrecv,srcaddr)) => {
-				if &srcaddr == destaddr && inbin[0..nrecv] == target[..] {
-					return Ok(());
-				}
-			},
-			// Handle non-fatal errors such as WouldBlock or Interrupted by just starting the
-			// next try. Other errors are propagated out.
-			Err(why) => match why.kind() {
-				io::ErrorKind::WouldBlock => (),
-				io::ErrorKind::Interrupted => (),
-				_ => return Err(why),
-			},
-		};
-	}
-	return Err(io::Error::new(io::ErrorKind::NotFound,"Specified data payload was not found"));
-}
-
 fn main() {
 	let argv:Vec<String> = args().collect();
 	if argv.len() != 3 {
@@ -335,7 +307,6 @@ fn main() {
 	// Spam detection and auth equipment. 
 	let mut banpoints:HashMap<IpAddr,u64> = HashMap::new();
 	let mut bannedips:HashSet<IpAddr> = HashSet::new();
-	let mut nonces:HashMap<SocketAddr,(Vec<u8>,Vec<u8>,Vec<u8>)> = HashMap::new(); // (noncevalue,challengenonce,responsenonce)
 	// Recovery loop: if an unignorable error occurs that requires restarting, we can `break` the inner loops
 	// to wait a set delay before restarting, or `continue` the 'recovery loop to restart immediately.
 	'recovery:loop {
@@ -349,7 +320,7 @@ fn main() {
 			},
 		};
 		let mut inbin:[u8;500]; // recv buffer. payloads longer than 500 bytes will be truncated!
-		let mut reggs:HashMap<SocketAddr,u64> = HashMap::new(); // directory of subscribed addresses
+		let mut subscriptions:HashSet<SocketAddr> = HashSet::new(); // directory of subscribed addresses
 		let listener:UdpSocket = match UdpSocket::bind(&format!("0.0.0.0:{}",portn)) {
 			Ok(socket) => socket,
 			Err(why) => {
@@ -376,11 +347,30 @@ fn main() {
 		// conditions requiring the system to be reset (e.g. loss of connectivity) can break the
 		// loop, and execution will be caught by the recovery loop and returned to the top.
 		println!("Server startup complete.\nListening for subscription requests...");
+		let mut inqueue:VecDeque<(SocketAddr,Vec<u8>)> = VecDeque::new();
 		'processor:loop {
 			sleep(Duration::new(0,1_000_000));
 			inbin = [0;500];
 			match listener.recv_from(&mut inbin) {
 				Ok((nrecv,srcaddr)) => {
+					let _ = inqueue.push_back((srcaddr,inbin[0..nrecv].to_vec()));
+				}
+				Err(why) => match why.kind() {
+					// Receiving from the UdpSocket failed for some reason. 
+					io::ErrorKind::WouldBlock => (), // Nothing in the receive buffer; we'll come back later.
+					io::ErrorKind::Interrupted => (), // Something stopped us in the middle of the operation, so I guess we'll try again later?
+					_ => {
+						// A real error happened, which is a problem. Maybe the OS nixed our socket
+						// binding, or the network is borked? I dunno, but since this server is
+						// supposed to run unsupervised, we'll just let the recovery loop catch us
+						// and try to start again, rather than exiting. 
+						println!("Error: Recv operation on socket failed - {}",why.description());
+						break 'processor;
+					},
+				},
+			}; // match recvfrom
+			match inqueue.pop_front() {
+				Some((srcaddr,recvdata)) => {
 					// First make sure the sender is not banned.
 					// It is important to do this as early as possible to minimize the impact of an
 					// ongoing DoS attack. If we only used cryptographic validation on a per-packet
@@ -392,14 +382,14 @@ fn main() {
 					if bannedips.contains(&srcaddr.ip()) {
 						continue 'processor;
 					} else if let Some(n) = banpoints.get(&srcaddr.ip()) {
-					// If the sender is not already banned, next check if they are a known offender
-					// who needs to be banned. This is a very slightly more costly operation than
-					// checking bans, but is still pretty lightweight and can safely be done here.
-					if *n > 10 {
-						let _ = bannedips.insert(srcaddr.ip());
-						let _ = reggs.remove(&srcaddr);
-						continue 'processor;
-					}
+						// If the sender is not already banned, next check if they are a known offender
+						// who needs to be banned. This is a very slightly more costly operation than
+						// checking bans, but is still pretty lightweight and can safely be done here.
+						if *n > 10 {
+							let _ = bannedips.insert(srcaddr.ip());
+							let _ = subscriptions.remove(&srcaddr);
+							continue 'processor;
+						}
 					} 
 					// If we have no records on this sender, add an entry to the banpoints ledger
 					// for them to keep track of their behavior.
@@ -409,14 +399,9 @@ fn main() {
 					// Packets containing a payload which is a single byte and one of the ASCII 
 					// non-printing control characters are reserved for client-server functions. 
 					// (Messages intended for clients with these characters should be longer than 
-					// one byte.) Messages starting with 0x02 with a length of exactly 25 characters 
-					// (an eight-byte auth-nonce encrypted and sent along with an eight-byte signature 
-					// and an eight-byte nonce) are also considered server messages, but messages 
-					// starting with 0x02 of any other length are passed to the client distribution
-					// handler (although, since encrypted messages must be at least 24 bits long,
-					// lengths of less than 24 will never validate).
-					if (nrecv == 1 && inbin[0] <= 0x1F && inbin[0] != 0x02) || (nrecv == 25 && inbin[0] == 0x02) {
-						match inbin[0] {
+					// one byte.)  
+					if recvdata.len() == 1 && recvdata[0] <= 0x1F {
+						match recvdata[0] {
 							0x18 => { // CANCEL
 								// Subscription cancellation: The sender has notified us that they
 								// are no longer listening and we should stop sending them
@@ -426,104 +411,30 @@ fn main() {
 								// Whenever a subscription is cancelled for any reason, we send END
 								// OF MEDIUM; the client can react to this however they like. 
 								println!("Subscription canceled by {}",srcaddr);
-								let _ = reggs.remove(&srcaddr);
+								let _ = subscriptions.remove(&srcaddr);
 								let _ = sendbytes(&listener,&srcaddr,&vec![0x19]); // END OF MEDIUM
 							},
 							0x16 => { // SYN
 								// Subscription renewal: This is basically a dummy message that
 								// clients can send to the server to have their subscription time
 								// updated without having anything relayed to the others.
-								if reggs.contains_key(&srcaddr) {
-									let _ = reggs.insert(srcaddr,systime());
+								if subscriptions.contains(&srcaddr) {
+									let _ = subscriptions.insert(srcaddr);
 									let _ = sendbytes(&listener,&srcaddr,&vec![0x06]); // ACK
 								} else {
 									let _ = sendbytes(&listener,&srcaddr,&vec![0x15]); // NAK
 								}
 							},
-							0x01 => { // START OF HEADING
-								// Send the client an authentication nonce.
-								println!("Auth request from {}. Sending authentication nonce...",srcaddr);
-								let nonce:Vec<u8> = int2bytes(&rand::random::<u64>()).to_vec();
-								let mut send:Vec<u8> = Vec::new();
-								send.push(0x01);
-								let mut sendcrypt:Vec<u8> = match encrypt(&nonce,&padpath) {
-									Ok(data) => data,
-									Err(why) => {
-										println!("Error: Failed to encrypt nonce - {}",why.description());
-										continue 'processor;
-									},
-								};
-								let challengenonce:Vec<u8> = sendcrypt[sendcrypt.len()-8..sendcrypt.len()].to_vec();
-								let _ = nonces.insert(srcaddr,(nonce,challengenonce.clone(),challengenonce));
-								send.append(&mut sendcrypt);
-								let _ = sendbytes(&listener,&srcaddr,&send);
-							},
-							0x02 => { // START OF TEXT
-								if let Some((noncevalue,challengenonce,responsenonce)) = nonces.get_mut(&srcaddr) {
-									if challengenonce == responsenonce {
-										if inbin[17..25].to_vec() == *challengenonce {
-											println!("Client {} returned invalid authentication. Access denied.",srcaddr);
-											let _ = sendbytes(&listener,&srcaddr,&vec![0x19]); // END OF MEDIUM
-											continue 'processor;
-										}
-										let recvdnonce:Vec<u8> = match decrypt(&inbin[1..25].to_vec(),&padpath) {
-											Err(why) => {
-												println!("Failed to decrypt returned nonce - {}",why.description());
-												let _ = sendbytes(&listener,&srcaddr,&vec![0x19]); // END OF MEDIUM
-												continue 'processor;
-											},
-											Ok(nonce) => nonce,
-										};
-										if recvdnonce == *noncevalue {
-											println!("Client {} authenticated successfully; opening subscription.",srcaddr);
-											let _ = sendbytes(&listener,&srcaddr,&vec![0x02]); // ACK
-											let _ = reggs.insert(srcaddr,systime());
-										} else {
-											let _ = sendbytes(&listener,&srcaddr,&vec![0x19]); // END OF MEDIUM
-											println!("Client {} returned invalid authentication. Access denied.",srcaddr);
-											continue 'processor
-										}
-									}
-								} else {
-									// No nonce on file for this host? If we haven't sent this host 
-									// a nonce, but they're trying to authenticate anyway, they must 
-									// be either pulling something or glitching out. Either way,
-									// that's a ban point.
-									println!("Client {} tried to send authentication without being sent a nonce. Denying access.",srcaddr);
-									let _ = sendbytes(&listener,&srcaddr,&vec![0x15]); // NAK
-									if let Some(n) = banpoints.get_mut(&srcaddr.ip()) {
-										*n += 1;
-									}
-									continue 'processor;
-								}
-							},
 							0x06 => (), // ACK
 							other => {
 								// Unimplemented control code? NAK response for now.
-								if let Some(t) = reggs.get_mut(&srcaddr) {
-									*t = systime();
-								}
 								println!("Host {} sent unknown control packet {}",srcaddr,bytes2hex(&vec![other]));
 								let _ = sendbytes(&listener,&srcaddr,&vec![0x15]); // NAK
 							},
-						}; // match inbin[0] ends here
+						}; // match recvdata[0]
 						continue 'processor;
 					}
-					if !reggs.contains_key(&srcaddr) {
-						// someone tried to send a message to other clients without first subscribing - this won't go.
-						// note that we shouldn't do anything too drastic, because this could
-						// easily be a legitimate client who just happened to miss the 0x19 packet
-						// sent when their subscription timed out.
-						let _ = sendbytes(&listener,&srcaddr,&vec![0x19]); // END OF MEDIUM
-						if !banpoints.contains_key(&srcaddr.ip()) {
-							let _ = banpoints.insert(srcaddr.ip(),0);
-						}
-						if let Some(n) = banpoints.get_mut(&srcaddr.ip()) {
-							*n += 1;
-						}
-						continue 'processor;
-					}
-					if nrecv < 24 { 
+					if recvdata.len() < 24 { 
 						// 24 is the minimum size of valid encrypted packet: 0 message bytes, 
 						// 8 timestamp bytes, 8 signature bytes, 8 nonce bytes. 
 						// Messages of length less than this cannot be decrypted, so we can't
@@ -531,12 +442,15 @@ fn main() {
 						// This is not a bannable offense, because there's a chance it's due to
 						// some type of send or receive error and not an evil client.
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x15]); // NAK
+						if let Some(points) = banpoints.get_mut(&srcaddr.ip()) {
+							*points += 1;
+						}
 						continue 'processor;
 					}
 					// If we've come this far, it means the message is a valid payload for
 					// decryption and comes from a subscribed and authenticated sender. It's time
 					// to try decrypting it, so we can verify it for integrity and log its payload.
-					let stampedmessage:Vec<u8> = match decrypt(&inbin[0..nrecv].to_vec(),&padpath) {
+					let stampedmessage:Vec<u8> = match decrypt(&recvdata,&padpath) {
 						Err(why) => match why.kind() {
 							io::ErrorKind::InvalidData => {
 								// Message decryption was attempted, but did not produce a valid
@@ -544,7 +458,10 @@ fn main() {
 								println!("Failed to verify packet received from {} - {}.",srcaddr,why.description());
 								println!("Terminating subscription to {} due to verification failure.",srcaddr);
 								let _ = sendbytes(&listener,&srcaddr,&vec![0x19]); // END OF MEDIUM
-								let _ = reggs.remove(&srcaddr);
+								let _ = subscriptions.remove(&srcaddr);
+								if let Some(points) = banpoints.get_mut(&srcaddr.ip()) {
+									*points += 1;
+								}
 								continue 'processor;
 							},
 							_ => {
@@ -584,65 +501,77 @@ fn main() {
 						continue 'processor;
 					}
 					// By this point, the packet is fully verified and can be retransmitted. 
-					let _ = reggs.insert(srcaddr,systime()); // update the activity timestamp for the sender
-					let mut iterreggs:HashMap<SocketAddr,u64> = reggs.clone(); // clone the subscribed-clients table into a temporary table for iteration
-					let _ = iterreggs.remove(&srcaddr); // remove the sender from the clone, to avoid returning to sender unnecessarily
-					'iteractive:for knownaddr in iterreggs.iter() {
-						if systime()-*knownaddr.1 > CONNECT_TIMEOUT {
-							// Before sending the message to each client, check to make sure that
-							// client isn't inactive. If it is inactive, knock it out of the table
-							// of subscribers (the original one, not the clone we're iterating
-							// over!). Also send off a notification of this event to the client in
-							// question, just in case it really is still there and just had its
-							// messages lost in transport.
-							println!("Stopping transmission to {} due to inactivity.",knownaddr.0.ip());
-							let _ = sendbytes(&listener,&knownaddr.0,&vec![0x19]); // END OF MEDIUM
-							let _ = reggs.remove(&knownaddr.0);
-							continue 'iteractive;
-						}
-						// If the client is not inactive, send the message to it, and automatically
-						// repeat the transmission until 0x06 ACK is received in response, we've
-						// tried ten times, or more than a second has passed with no response.
-						match sendbytesuntil(&listener,&knownaddr.0,&inbin[..nrecv].to_vec(),&vec![0x06],&5000,&10) {
-						//match sendbytes(&listener,&knownaddr.0,&inbin[..nrecv].to_vec()) {
-							Err(why) => match why.kind() {
-									io::ErrorKind::NotFound => {
-										// No response after maximum number of attempts.
-										// Subscription needs to be closed.
-										let _ = sendbytes(&listener,&knownaddr.0,&vec![0x19]); // END OF MEDIUM
-										let _ = reggs.remove(&knownaddr.0);
-										println!("Terminating subscription for {} - No response.",knownaddr.0);
-									},
+					if !subscriptions.contains(&srcaddr) {
+						// Let the sender know that they were subscribed if they weren't already
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x02]); // START OF TEXT
+						let _ = subscriptions.insert(srcaddr); // update the activity timestamp for the sender
+					}
+					if message.len() == 0 {
+						// If this is an empty message, don't bother relaying it. These types of
+						// messages can be used as subscription requests.
+						continue 'processor;
+					}
+					let mut remainingsends:HashSet<SocketAddr> = subscriptions.clone(); // clone the subscribed-clients table into a temporary table
+					let _ = remainingsends.remove(&srcaddr); // remove the sender from the clone, to avoid returning to sender unnecessarily
+					if remainingsends.len() == 0 {
+						// If there is no one else on the server, let the client know by
+						// responding with 0x03 END OF TEXT instead of 0x06 ACK.
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x03]); // END OF TEXT
+						continue 'processor;
+					}
+					'sendtry:for _ in 0..10 {
+						let mut iterremaining = remainingsends.clone();
+						'itersend:for knownaddr in iterremaining.iter() {
+							match sendbytes(&listener,&knownaddr,&recvdata) {
+								Err(why) => {
+									println!("Error while attempting to send to {} - {}.",knownaddr,why.description());
+								},
+								Ok(_) => (),
+							};
+						} // 'itersend
+						sleep(Duration::new(0,100_000_000));
+						let mut ackbin:[u8;500] = [0;500];
+						'getacks:loop {
+							match listener.recv_from(&mut ackbin) {
+								Err(why) => match why.kind() {
+									io::ErrorKind::WouldBlock => break 'getacks,
 									_ => {
-										// Some other error, our fault. It's possible this is
-										// transient, so we don't necessarily need to unsubscribe
-										// the client.
-										// It also wouldn't be especially useful to try to send
-										// them a notification about this, because sending the
-										// actual message didn't work.
-										println!("Error while attempting to send to {} - {}.",knownaddr.0,why.description());
+										println!("Error while attempting to receive acknowledgements: {}",why.description());
+										break 'getacks;
 									},
-							},
-							Ok(_) => (), 
-						};
-					} // 'iteractive
-					println!("Relayed message to {} clients.",reggs.len()-1); // looks dangerous, but we'd never have arrived here without at least one subscriber.
+								},
+								Ok((nrecv,srcaddr)) => {
+									if nrecv == 1 && ackbin[0] == 0x06 {
+										let _ = remainingsends.remove(&srcaddr);
+									} else {
+										// if this message wasn't an ACK, push it onto the main
+										// handler's queue so it can be parsed by the main program.
+										let _ = inqueue.push_back((srcaddr,ackbin[0..nrecv].to_vec()));
+									}
+								},
+							};
+						}
+					    if remainingsends.len() == 0 {
+					        // If we've already sent out all the messages we need to send, don't
+					        // try to run again.
+					        break 'sendtry;
+					    }
+					} // 'sendtry
+					println!("Relayed message to {} clients.",subscriptions.len()-1);
+					if remainingsends.len() > 0 {
+						println!("The following clients did not respond and have been unsubscribed:");
+						for knownaddr in remainingsends.iter() {
+							println!("{}",knownaddr);
+							let _ = subscriptions.remove(&knownaddr);
+							let _ = sendbytes(&listener,&knownaddr,&vec![0x19]); // END OF MEDIUM
+						}
+					}
 					let _ = sendbytes(&listener,&srcaddr,&vec![0x06]); // ACK
-				}, // recv Ok
-				Err(why) => match why.kind() {
-					// Receiving from the UdpSocket failed for some reason. 
-					io::ErrorKind::WouldBlock => (), // Nothing in the receive buffer; we'll come back later.
-					io::ErrorKind::Interrupted => (), // Something stopped us in the middle of the operation, so I guess we'll try again later?
-					_ => {
-						// A real error happened, which is a problem. Maybe the OS nixed our socket
-						// binding, or the network is borked? I dunno, but since this server is
-						// supposed to run unsupervised, we'll just let the recovery loop catch us
-						// and try to start again, rather than exiting. 
-						println!("Error: Recv operation on socket failed - {}",why.description());
-						break 'processor;
-					},
+				}, // pop Some
+				None => {
+					sleep(Duration::new(0,10_000_000));
 				},
-			}; // match recvfrom
+			}; // match inqueue.pop_front()
 			// Time delay for the processor is handled at the top, not here, so that `continue`
 			// operations will still use the time delay.
 		} // 'processor
