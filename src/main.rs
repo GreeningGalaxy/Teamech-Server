@@ -31,8 +31,6 @@
  * 0x03 END OF TEXT - Sent to a client instead of ACK when that client is the only one connected.
  * 0x06 ACK - Generic acknowledge - Packet was successfully rebroadcast to other subscribers.
  * 0x15 NAK - Generic refusal - Packet was invalid (e.g. bad signature or timestamp) or inappropriate.
- * 0x16 SYNCHRONOUS IDLE -	Response to client sending the same; indicates that the client's
- *							subscription was renewed successfully.
  * 0x19 END OF MEDIUM - Subscription invalidity notification. Client needs to re-authenticate
  *						before sending additional data.
  * 0x1A SUBSTITUTE - Server-side error notification. Client message may have been valid, but server
@@ -57,7 +55,9 @@ use std::fs;
 use std::path::Path;
 
 // Default Parameters
-static MAX_PACKET_DELAY:u64 = 10_000;   // Maximum amount of time in the past a packet's timestamp can be in order to validate.
+static MAX_PACKET_DELAY:u64 = 5_000;    // Maximum amount of time in the past or future a packet's timestamp can be in order to validate.
+static MAX_BANNABLE_OFFENSES:u64 = 10;  // Maximum number of times a client can misstep before having their IP banned.
+static MAX_DELIVERY_FAILURES:u64 = 5;   // Maximum number of times a client can fail to respond to a delivery before being dropped.
 
 // systime function; gets the unixtime in milliseconds.
 fn systime() -> u64 {
@@ -247,11 +247,11 @@ fn decrypt(payload:&Vec<u8>,padpath:&Path) -> Result<Vec<u8>,io::Error> {
 
 // Sends a vector of bytes to a specific host over a specific socket, automatically retrying in the event of certain errors
 // and aborting in the event of others.
-fn sendbytes(listener:&UdpSocket,destaddr:&SocketAddr,bytes:&Vec<u8>) -> Result<(),io::Error> {
+fn sendraw(listener:&UdpSocket,destaddr:&SocketAddr,payload:&Vec<u8>) -> Result<(),io::Error> {
 	// loop until either the send completes or an unignorable error occurs.
 	loop {
-		match listener.send_to(&bytes[..],destaddr) {
-			Ok(nsend) => match nsend < bytes.len() {
+		match listener.send_to(&payload[..],destaddr) {
+			Ok(nsend) => match nsend < payload.len() {
 				// If the message sends in its entirety, exit with success. If it sends
 				// incompletely, try again.
 				false => return Ok(()),
@@ -262,16 +262,37 @@ fn sendbytes(listener:&UdpSocket,destaddr:&SocketAddr,bytes:&Vec<u8>) -> Result<
 				// WouldBlock for a send operation usually means that the transmit buffer is full.
 				io::ErrorKind::Interrupted => (),
 				io::ErrorKind::WouldBlock => {
-					println!("Error: failed to send byte - transmit buffer overflow!");
+					println!("{} Error: failed to send byte - transmit buffer overflow!",systime());
 					return Err(why);
 				},
 				_ => {
-					println!("Error: failed to send byte - {}",why.description());
+					println!("{} Error: failed to send byte - {}",systime(),why.description());
 					return Err(why);
 				},
 			},
 		};
 	}
+}
+
+// Automatically encrypts a vector of bytes and sends them over the socket.
+fn sendbytes(listener:&UdpSocket,destaddr:&SocketAddr,bytes:&Vec<u8>,padpath:&Path) -> Result<(),io::Error> {
+    let mut stampedbytes = bytes.clone();
+    stampedbytes.append(&mut int2bytes(&systime()).to_vec());
+	let payload = match encrypt(&stampedbytes,&padpath) {
+	    Err(why) => {
+	        println!("Could not encrypt bytes - {}",why.description());
+	        return Err(why);
+	    },
+	    Ok(b) => b,
+	};
+	return sendraw(&listener,&destaddr,&payload);
+}
+
+#[derive(Clone)]
+struct Subscription {
+    lastact:u64,
+    pendingack:bool,
+    deliveryfailures:u64,
 }
 
 fn main() {
@@ -290,9 +311,10 @@ fn main() {
 		} else {
 			// If the user asked for port 0, tell them all about why that won't go and what we're doing
 			// instead of passing 0 to the OS.
-			print!("Warning: Port 0 (OS auto-select) has been provided. Autoselection of port numbers is not supported for the server by the Teamech protocol, ");
-			print!("so port 6666 (the Teamech default) has been selected. If you try to run two instances of Teamech with port 0 specified for both, it will ");
-			print!("NOT work - if you want to run more than one Teamech server at a time, you *need* to specify the ports for each manually.");
+			print!("Warning: Port 0 (OS auto-select) has been provided. Autoselection of port numbers is not supported for the server ");
+			print!("by the Teamech protocol, so port 6666 (the Teamech default) has been selected. If you try to run two instances of ");
+			print!("Teamech with port 0 specified for both, it will NOT work - if you want to run more than one Teamech server at a ");
+			print!("time, you *need* to specify the ports for each manually.");
 			println!();
 			portn = 6666;
 		}
@@ -316,11 +338,11 @@ fn main() {
 				process::exit(1);
 			},
 			Ok(_) => {
-				println!("Initialized pad file.");
+				println!("{} Initialized pad file.",systime());
 			},
 		};
 		let mut inbin:[u8;500]; // recv buffer. payloads longer than 500 bytes will be truncated!
-		let mut subscriptions:HashMap<SocketAddr,u64> = HashMap::new(); // directory of subscribed addresses and delivery failures
+		let mut subscriptions:HashMap<SocketAddr,Subscription> = HashMap::new(); // directory of subscribed addresses and delivery failures
 		let listener:UdpSocket = match UdpSocket::bind(&format!("0.0.0.0:{}",portn)) {
 			Ok(socket) => socket,
 			Err(why) => {
@@ -331,7 +353,7 @@ fn main() {
 				process::exit(1);
 			},
 		};
-		println!("Opened socket on port {}.",portn);
+		println!("{} Opened socket on port {}.",systime(),portn);
 		match listener.set_nonblocking(true) {
 			Ok(_) => (),
 			Err(why) => {
@@ -346,7 +368,7 @@ fn main() {
 		// Processor loop: When the server is running nominally, this never breaks. Error
 		// conditions requiring the system to be reset (e.g. loss of connectivity) can break the
 		// loop, and execution will be caught by the recovery loop and returned to the top.
-		println!("Server startup complete.\nListening for subscription requests...");
+		println!("{} Server startup complete. Listening for subscription requests...",systime());
 		let mut inqueue:VecDeque<(SocketAddr,Vec<u8>)> = VecDeque::new();
 		'processor:loop {
 			sleep(Duration::new(0,1_000_000));
@@ -364,28 +386,37 @@ fn main() {
 						// binding, or the network is borked? I dunno, but since this server is
 						// supposed to run unsupervised, we'll just let the recovery loop catch us
 						// and try to start again, rather than exiting. 
-						println!("Error: Recv operation on socket failed - {}",why.description());
+						println!("{} Error: Recv operation on socket failed - {}",systime(),why.description());
 						break 'processor;
 					},
 				},
 			}; // match recvfrom
+			for sub in subscriptions.iter_mut() {
+				if sub.1.pendingack && sub.1.lastact+MAX_PACKET_DELAY*2 < systime() {
+					println!("{} Client at {} failed to acknowledge the most recent messages [{}].",systime(),sub.0,sub.1.deliveryfailures+1);
+					sub.1.deliveryfailures += 1;
+					sub.1.pendingack = false;
+				} 
+			}
+			for sub in subscriptions.clone().iter() {
+				if sub.1.deliveryfailures > MAX_DELIVERY_FAILURES {
+					println!("{} Client at {} stopped responding and was unsubscribed.",systime(),sub.0);
+					let _ = subscriptions.remove(&sub.0);
+					let _ = sendbytes(&listener,&sub.0,&vec![0x19],&padpath); // END OF MEDIUM
+				}
+			}
 			match inqueue.pop_front() {
 				Some((srcaddr,recvdata)) => {
 					// First make sure the sender is not banned.
 					// It is important to do this as early as possible to minimize the impact of an
-					// ongoing DoS attack. If we only used cryptographic validation on a per-packet
-					// basis without the authentication ritual at the beginning of subscriptions,
-					// then a large volume of garbage packets would cause a large amount of system
-					// load due to the constant attempted decryption process.
-					// Checking bans with a hash set scales very well and is a cheap operation to
-					// perform at the beginning of the input-handling processes.
+					// ongoing DoS attack. 
 					if bannedips.contains(&srcaddr.ip()) {
 						continue 'processor;
 					} else if let Some(n) = banpoints.get(&srcaddr.ip()) {
 						// If the sender is not already banned, next check if they are a known offender
 						// who needs to be banned. This is a very slightly more costly operation than
 						// checking bans, but is still pretty lightweight and can safely be done here.
-						if *n > 10 {
+						if *n > MAX_BANNABLE_OFFENSES {
 							let _ = bannedips.insert(srcaddr.ip());
 							let _ = subscriptions.remove(&srcaddr);
 							continue 'processor;
@@ -396,44 +427,6 @@ fn main() {
 					if !banpoints.contains_key(&srcaddr.ip()) {
 						let _ = banpoints.insert(srcaddr.ip(),0);
 					}
-					// Packets containing a payload which is a single byte and one of the ASCII 
-					// non-printing control characters are reserved for client-server functions. 
-					// (Messages intended for clients with these characters should be longer than 
-					// one byte.)  
-					if recvdata.len() == 1 && recvdata[0] <= 0x1F {
-						match recvdata[0] {
-							0x18 => { // CANCEL
-								// Subscription cancellation: The sender has notified us that they
-								// are no longer listening and we should stop sending them
-								// messages. This is technically an optional courtesy, since
-								// eventually we'll just time them out, but it helps keep the
-								// server load down if clients use this properly.
-								// Whenever a subscription is cancelled for any reason, we send END
-								// OF MEDIUM; the client can react to this however they like. 
-								println!("Subscription canceled by {}",srcaddr);
-								let _ = subscriptions.remove(&srcaddr);
-								let _ = sendbytes(&listener,&srcaddr,&vec![0x19]); // END OF MEDIUM
-							},
-							0x16 => { // SYN
-								// Subscription renewal: This is basically a dummy message that
-								// clients can send to the server to have their subscription time
-								// updated without having anything relayed to the others.
-								if subscriptions.contains_key(&srcaddr) {
-									let _ = subscriptions.insert(srcaddr,0);
-									let _ = sendbytes(&listener,&srcaddr,&vec![0x06]); // ACK
-								} else {
-									let _ = sendbytes(&listener,&srcaddr,&vec![0x15]); // NAK
-								}
-							},
-							0x06 => (), // ACK
-							other => {
-								// Unimplemented control code? NAK response for now.
-								println!("Host {} sent unknown control packet {}",srcaddr,bytes2hex(&vec![other]));
-								let _ = sendbytes(&listener,&srcaddr,&vec![0x15]); // NAK
-							},
-						}; // match recvdata[0]
-						continue 'processor;
-					}
 					if recvdata.len() < 24 { 
 						// 24 is the minimum size of valid encrypted packet: 0 message bytes, 
 						// 8 timestamp bytes, 8 signature bytes, 8 nonce bytes. 
@@ -441,7 +434,7 @@ fn main() {
 						// validate them, and won't relay them to clients.
 						// This is not a bannable offense, because there's a chance it's due to
 						// some type of send or receive error and not an evil client.
-						let _ = sendbytes(&listener,&srcaddr,&vec![0x15]); // NAK
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 						if let Some(points) = banpoints.get_mut(&srcaddr.ip()) {
 							*points += 1;
 						}
@@ -455,9 +448,9 @@ fn main() {
 							io::ErrorKind::InvalidData => {
 								// Message decryption was attempted, but did not produce a valid
 								// signed message. This is grounds for summary deauthentication.
-								println!("Failed to verify packet received from {} - {}.",srcaddr,why.description());
-								println!("Terminating subscription to {} due to verification failure.",srcaddr);
-								let _ = sendbytes(&listener,&srcaddr,&vec![0x19]); // END OF MEDIUM
+								println!("{} Failed to verify packet received from {} - {}.",systime(),srcaddr,why.description());
+								println!("{} Terminating subscription to {} due to verification failure.",systime(),srcaddr);
+								let _ = sendbytes(&listener,&srcaddr,&vec![0x19],&padpath); // END OF MEDIUM
 								let _ = subscriptions.remove(&srcaddr);
 								if let Some(points) = banpoints.get_mut(&srcaddr.ip()) {
 									*points += 1;
@@ -469,15 +462,17 @@ fn main() {
 								// fault (e.g. the pad file couldn't be read). This is not a
 								// bannable or deauthenticable offense; instead, we simply notify
 								// the sender that the server is having trouble.
-								println!("Failed to decrypt packet received from {} - {}.",srcaddr,why.description());
-								let _ = sendbytes(&listener,&srcaddr,&vec![0x1A]); // SUBSTITUTE (server-side error)
+								println!("{} Failed to decrypt packet received from {} - {}.",systime(),srcaddr,why.description());
+								let _ = sendbytes(&listener,&srcaddr,&vec![0x1A],&padpath); // SUBSTITUTE (server-side error)
 								continue 'processor;
 							},
 						},
 						Ok(bytes) => bytes,
 					};
 					let message:Vec<u8> = stampedmessage[0..stampedmessage.len()-8].to_vec();
-					println!("{} -> {} [{}]",srcaddr,String::from_utf8_lossy(&message),bytes2hex(&message));
+					if message.len() > 1 {
+					    println!("{} {} -> {} [{}]",systime(),srcaddr,String::from_utf8_lossy(&message),bytes2hex(&message));
+					}
 					// Reaching this point means the message decrypted and validated successfully.
 					// However, we still need to verify the timestamp to make sure this isn't a
 					// replay attack.
@@ -488,109 +483,106 @@ fn main() {
 						// Packet timestamp more than the allowed delay into the future? This is a
 						// very weird and unlikely case, probably a clock sync error and not an
 						// attack, but we'll reject it anyway just to be on the safe side.
-						println!("Packet from {} supposedly had a timestamp {} ms in the future. Rejecting; please check your clocks.",
-																										srcaddr,inttimestamp-systime());
-						let _ = sendbytes(&listener,&srcaddr,&vec![0x15]); // NAK
+						println!("{} Packet from {} supposedly had a timestamp {} ms in the future. Rejecting; please check your clocks.",
+																								systime(),srcaddr,inttimestamp-systime());
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 						continue 'processor;
 					} else if systime() > inttimestamp+MAX_PACKET_DELAY {
 						// This is the most likely situation in an actual replay attack - the
 						// timestamp is too far in the past. This means we need to reject the
 						// packet, since it could be used to confuse clients maliciously.
-						println!("Message from {} has a timestamp {} ms in the past, which is too long. Rejecting.",srcaddr,systime()-bytes2int(&timestamp));
-						let _ = sendbytes(&listener,&srcaddr,&vec![0x15]); // NAK
+						println!("{} Message from {} has a timestamp {} ms in the past, which is too long. Rejecting.",
+						                                            systime(),srcaddr,systime()-bytes2int(&timestamp));
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 						continue 'processor;
 					}
 					// By this point, the packet is fully verified and can be retransmitted. 
 					if !subscriptions.contains_key(&srcaddr) {
 						// Let the sender know that they were subscribed if they weren't already
-						let _ = sendbytes(&listener,&srcaddr,&vec![0x02]); // START OF TEXT
-						let _ = subscriptions.insert(srcaddr,0); // update the activity timestamp for the sender
-						println!("Client at {} has been subscribed.",srcaddr);
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x02],&padpath); // START OF TEXT
+						println!("{} Client at {} has been subscribed.",systime(),srcaddr);
 					}
+					// Insert the new subscription, or reset the sender's existing subscription 
+					// status to keep it current. Note that this is the only way to clear delivery 
+					// failures (by sending a valid encrypted message) - simply acknowledging
+					// messages sent will reset the last-seen time and pending-ack status, but will
+					// not clear delivery failures.
+					if let Some(sub) = subscriptions.get_mut(&srcaddr) {
+					    if sub.deliveryfailures > 0 {
+					        println!("Resetting delivery failure count for host {} to 0 (was {})",srcaddr,sub.deliveryfailures);
+					    }
+					}
+					let _ = subscriptions.insert(srcaddr,Subscription{lastact:systime(),pendingack:false,deliveryfailures:0});
 					if message.len() == 0 {
 						// If this is an empty message, don't bother relaying it. These types of
 						// messages can be used as subscription requests.
-						let _ = sendbytes(&listener,&srcaddr,&vec![0x02]); // START OF TEXT
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x02],&padpath); // START OF TEXT
 						continue 'processor;
 					}
-					let mut remainingsends:HashMap<SocketAddr,u64> = subscriptions.clone(); // clone the subscribed-clients table into a temporary table
-					let _ = remainingsends.remove(&srcaddr); // remove the sender from the clone, to avoid returning to sender unnecessarily
-					if remainingsends.len() == 0 {
+					// Payloads containing a message which is a single byte and one of the ASCII 
+					// non-printing control characters are reserved for client-server functions. 
+					// (Messages intended for clients with these characters should be longer than 
+					// one byte.)  
+					if message.len() == 1 && message[0] <= 0x1F {
+						match message[0] {
+							0x18 => { // CANCEL
+								// Subscription cancellation: The sender has notified us that they
+								// are no longer listening and we should stop sending them
+								// messages. This is technically an optional courtesy, since
+								// eventually we'll just time them out, but it helps keep the
+								// server load down if clients use this properly.
+								// Whenever a subscription is cancelled for any reason, we send END
+								// OF MEDIUM; the client can react to this however they like. 
+								println!("{} Subscription canceled by {}",systime(),srcaddr);
+								let _ = subscriptions.remove(&srcaddr);
+								let _ = sendbytes(&listener,&srcaddr,&vec![0x19],&padpath); // END OF MEDIUM
+							},
+							0x06 => {
+                                if let Some(sub) = subscriptions.get_mut(&srcaddr) {
+                                    sub.pendingack = false;
+                                    sub.lastact = systime();
+                                } else {
+                                    let _ = sendbytes(&listener,&srcaddr,&vec![0x19],&padpath); // END OF MEDIUM
+                                }
+							},
+							other => {
+								// Unimplemented control code? NAK response for now.
+								println!("{} Host {} sent unknown control packet {}",systime(),srcaddr,bytes2hex(&vec![other]));
+								let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
+							},
+						}; // match recvdata[0]
+						continue 'processor;
+					}
+					// Produce a table of subscribers other than the sender, to which to send the
+					// message.
+					let mut othersubs:HashMap<SocketAddr,Subscription> = subscriptions.clone();
+					let _ = othersubs.remove(&srcaddr);
+					if othersubs.len() == 0 {
 						// If there is no one else on the server, let the client know by
 						// responding with 0x03 END OF TEXT instead of 0x06 ACK.
-						let _ = sendbytes(&listener,&srcaddr,&vec![0x03]); // END OF TEXT
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x03],&padpath); // END OF TEXT
 						continue 'processor;
 					}
-					'sendtry:for _ in 0..3 {
-					    // If no ACK is received for the first send, try up to three times for each
-					    // client subscriber.
-						let mut iterremaining = remainingsends.clone();
-						'itersend:for knownaddr in iterremaining.keys() {
-							match sendbytes(&listener,&knownaddr,&recvdata) {
-								Err(why) => {
-									println!("Error while attempting to send to {} - {}.",knownaddr,why.description());
-								},
-								Ok(_) => (),
-							};
-						} // 'itersend
-						// Wait 100 ms before trying to receive ACKs. This does not add latency to
-						// packets sent while the server is idle, but does serve as a rate-limiter
-						// on how fast packets can be relayed.
-						// To go faster, we might eventually write a completely new server using
-						// async, but this will do for now.
-						sleep(Duration::new(0,100_000_000));
-						let mut ackbin:[u8;500] = [0;500];
-						'getacks:loop {
-							match listener.recv_from(&mut ackbin) {
-								Err(why) => match why.kind() {
-									io::ErrorKind::WouldBlock => break 'getacks,
-									_ => {
-										println!("Error while attempting to receive acknowledgements: {}",why.description());
-										break 'getacks;
-									},
-								},
-								Ok((nrecv,srcaddr)) => {
-									if nrecv == 1 && ackbin[0] == 0x06 {
-									    // Whenever an ACK comes in, remove that client from the
-									    // list of clients who still haven't gotten the message.
-									    // If that client has any delivery failures counted, clear
-									    // them.
-										let _ = remainingsends.remove(&srcaddr);
-										let _ = subscriptions.insert(srcaddr,0);
-									} else {
-										// if this message wasn't an ACK, push it onto the main
-										// handler's queue so it can be parsed by the main program.
-										let _ = inqueue.push_back((srcaddr,ackbin[0..nrecv].to_vec()));
-									}
-								},
-							};
-						}
-					    if remainingsends.len() == 0 {
-					        // If we've already sent out all the messages we need to send, don't
-					        // try to run again.
-					        break 'sendtry;
-					    }
-					} // 'sendtry
-					println!("Relayed message to {} clients.",subscriptions.len()-1);
-					if remainingsends.len() > 0 {
-						for knownaddr in remainingsends.keys() {
-						    if let Some(failures) = subscriptions.get_mut(&knownaddr) {
-						        println!("Client at {} failed to acknowledge this message.",knownaddr);
-						        *failures += 1;
-							}
-							if let Some(failures) = subscriptions.clone().get(&knownaddr) {
-						        if *failures > 10 {
-							        println!("Client at {} stopped responding and was unsubscribed.",knownaddr);
-							        let _ = subscriptions.remove(&knownaddr);
-							        let _ = sendbytes(&listener,&knownaddr,&vec![0x19]); // END OF MEDIUM
+					'itersend:for destaddr in othersubs.keys() {
+						match sendraw(&listener,&destaddr,&recvdata) {
+							Err(why) => {
+								println!("{} Error while attempting to send to {} - {}.",systime(),destaddr,why.description());
+							},
+							Ok(_) => {
+							    if let Some(sub) = subscriptions.get_mut(&destaddr) {
+							        if !sub.pendingack {
+    							        sub.pendingack = true;
+	    						        sub.lastact = systime();
+	    						    }
 							    }
-							}
-						}
-					}
+							},
+						};
+					} // 'itersend
+					println!("{} Relayed message to {} clients.",systime(),subscriptions.len()-1);
 					if subscriptions.len() > 1 {
-					    let _ = sendbytes(&listener,&srcaddr,&vec![0x06]); // ACK
+					    let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&padpath); // ACK
 					} else {
-					    let _ = sendbytes(&listener,&srcaddr,&vec![0x03]); // END OF TEXT
+					    let _ = sendbytes(&listener,&srcaddr,&vec![0x03],&padpath); // END OF TEXT
 					}
 				}, // pop Some
 				None => {
