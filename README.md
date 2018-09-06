@@ -86,16 +86,17 @@ useful to be able to glance over if anything goes wrong. An upcoming version of 
 log all of these messages to a file in addition to the console.    
   
 ### Client
-The only functional client at the moment is the Teamech Desktop console client, which is
-intended to serve as the master control interface for the Teamech network's human operator. The
-console client uses ncurses to provide a simple scrolling command-line interface somewhat
+There are two clients available for Teamech: the desktop client and the embedded client.  
+The desktop client is intended to serve as the master control interface for the Teamech network's 
+human operator. It uses ncurses to provide a simple scrolling command-line interface somewhat
 reminiscent of console-based IRC clients. You can type messages into a simple input line, and 
 press enter to have them encrypted and sent to the server. When the server replies with a status
-code, the code will appear in hex form on the far right end of the corresponding line.
-An embedded (non-user-facing) template version of the client is planned. This will simply be the
-desktop client stripped of all user input and ncurses-related code, primarily designed to be run
-on a Raspberry Pi controlling a piece of equipment using its GPIO or serial interfaces.  
-The client can be run from the command line like so:  
+code, the code will appear in hex form on the far right end of the corresponding line.  
+The embedded client lacks the ncurses user interface, and is intended for developing 
+application-specific clients to be run on device controllers, which receive their instructions
+and send responses over Teamech. In its basic form, the embedded client does nothing; it must be
+modified to carry out the task that the embedded controller is used for.
+The desktop console client can be run from the command line like so:  
 `./teamech-desktop [server address:port number] [local port number (optional)] [path to pad file]`
 If unspecified, the local port number will default to 0, which tells the OS to allocate a port 
 dynamically (this is fine for the client, since no one needs to remember which port is being used).
@@ -105,7 +106,7 @@ port, then the command would be
 `./teamech-desktop example.com:6666 teamech.pad`  
   
 ### Building
-To build either the Teamech server or client, follow these steps:  
+To build the Teamech server, follow these steps:  
 1. Install an up-to-date stable distribution of Rust (per the Rust website, you can do this on most
 Linux distributions by running `curl https://sh.rustup.rs -sSf | sh`).
 2. Clone this repository (`git clone https://github.com/diodelass/Teamech-Server`) and `cd` into
