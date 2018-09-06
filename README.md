@@ -1,6 +1,7 @@
-# Teamech - A Simple Application Layer for the Intranet of Things
+# Teamech
+## A Simple Application Layer for the Intranet of Things
 
-## Introduction
+### Introduction
 For many folks who work on technology, the "Internet of Things" has become a scary term. It 
 brings to mind completely frivolous and frighteningly insecure systems that let you use your
 smartphone to control your household appliances remotely, usually involving a propretary app
@@ -15,7 +16,7 @@ to do a lot of neat things while remaining low-power and inexpensive. A Pi can c
 as either a server or a client on the network; In the future, versions of the client targeting 
 smaller and cheaper microcontroller modules are also planned.  
 
-## Network Architecture
+### Network Architecture
 Teamech uses a star topology for its networks. Networks must include exactly one server, but
 may include any number of clients. Messages sent from one client to the server are relayed to
 all other clients. The transport layer is UDP, chosen over TCP to allow greater downtime for 
@@ -27,7 +28,7 @@ it to a list of "subscribed" (active) clients, and begins relaying messages from
 to the new client. Clients are unsubscribed when they cancel their subscription or fail to 
 acknowledge a relayed message.  
 
-## Communication
+### Communication
 Whenever a client wants to send a message over a Teamech network, it simply timestamps and 
 encrypts a message of arbitrary length (between 0 and 476 characters) and sends it to the
 server. The server will then reply with a single-byte status code that indicates whether the
@@ -53,7 +54,7 @@ implemented:
 **0x18 CANCEL** - Cancels subscription, informing the server that the client should no longer
 be sent messages from other clients.  
 
-## Security
+### Security
 Teamech includes its own custom encryption scheme, Teacrypt, which is designed to be simple 
 and reasonably secure. While it should not be relied upon in cases where security is critical,
 it should be good enough to prevent your nosy neighbors, IT department, or local police from
@@ -70,7 +71,7 @@ the server can and does log messages sent through it, and will not relay message
 cannot open and log the contents of. It is assumed that a Teamech server will be secure and
 run by a trusted party (ideally the same person who owns/manages the client devices).  
 
-## Server
+### Server
 The Teamech server is essentially a very simple packet relay with message authentication. It
 can run on very low-powered hardware, and requires network throughput capability equal to the
 maximum continuous throughput from each client times the typical number of clients. For most 
@@ -84,7 +85,7 @@ The server will provide fairly verbose output to stdout every time something hap
 useful to be able to glance over if anything goes wrong. An upcoming version of the server will
 log all of these messages to a file in addition to the console.    
 
-## Client
+### Client
 The only functional client at the moment is the Teamech Desktop console client, which is
 intended to serve as the master control interface for the Teamech network's human operator. The
 console client uses ncurses to provide a simple scrolling command-line interface somewhat
@@ -95,7 +96,7 @@ An embedded (non-user-facing) template version of the client is planned. This wi
 desktop client stripped of all user input and ncurses-related code, primarily designed to be run
 on a Raspberry Pi controlling a piece of equipment using its GPIO or serial interfaces.  
 
-## Mobile Support
+### Mobile Support
 No native support for mobile devices is planned - I have no intention of developing an app for 
 Android / iOS or any other smartphone-oriented platform. Extremely basic support for Android may
 eventually be achieved using a client written in Python and an app providing a terminal 
