@@ -1,6 +1,6 @@
 # Teamech
 ## A Simple Application Layer for the Intranet of Things
-
+  
 ### Introduction
 For many folks who work on technology, the "Internet of Things" has become a scary term. It 
 brings to mind completely frivolous and frighteningly insecure systems that let you use your
@@ -15,7 +15,7 @@ The main embedded device I have in mind is the Raspberry Pi, which has enough co
 to do a lot of neat things while remaining low-power and inexpensive. A Pi can currently act
 as either a server or a client on the network; In the future, versions of the client targeting 
 smaller and cheaper microcontroller modules are also planned.  
-
+  
 ### Network Architecture
 Teamech uses a star topology for its networks. Networks must include exactly one server, but
 may include any number of clients. Messages sent from one client to the server are relayed to
@@ -27,7 +27,7 @@ sent where. When a new client sends a valid encrypted message to the server, the
 it to a list of "subscribed" (active) clients, and begins relaying messages from other clients 
 to the new client. Clients are unsubscribed when they cancel their subscription or fail to 
 acknowledge a relayed message.  
-
+  
 ### Communication
 Whenever a client wants to send a message over a Teamech network, it simply timestamps and 
 encrypts a message of arbitrary length (between 0 and 476 characters) and sends it to the
@@ -53,7 +53,7 @@ implemented:
 **0x06 ACK** - Response to being sent a non-control message (from other clients).   
 **0x18 CANCEL** - Cancels subscription, informing the server that the client should no longer
 be sent messages from other clients.  
-
+  
 ### Security
 Teamech includes its own custom encryption scheme, Teacrypt, which is designed to be simple 
 and reasonably secure. While it should not be relied upon in cases where security is critical,
@@ -70,7 +70,7 @@ Note that while Teacrypt can be used for such, Teamech does not offer end-to-end
 the server can and does log messages sent through it, and will not relay messages that it 
 cannot open and log the contents of. It is assumed that a Teamech server will be secure and
 run by a trusted party (ideally the same person who owns/manages the client devices).  
-
+  
 ### Server
 The Teamech server is essentially a very simple packet relay with message authentication. It
 can run on very low-powered hardware, and requires network throughput capability equal to the
@@ -84,7 +84,7 @@ For example, if the port to use is 6666 and the pad file is in the current direc
 The server will provide fairly verbose output to stdout every time something happens, which is
 useful to be able to glance over if anything goes wrong. An upcoming version of the server will
 log all of these messages to a file in addition to the console.    
-
+  
 ### Client
 The only functional client at the moment is the Teamech Desktop console client, which is
 intended to serve as the master control interface for the Teamech network's human operator. The
@@ -95,7 +95,42 @@ code, the code will appear in hex form on the far right end of the corresponding
 An embedded (non-user-facing) template version of the client is planned. This will simply be the
 desktop client stripped of all user input and ncurses-related code, primarily designed to be run
 on a Raspberry Pi controlling a piece of equipment using its GPIO or serial interfaces.  
-
+The client can be run from the command line like so:  
+`./teamech-desktop [server address:port number] [local port number (optional)] [path to pad file]`
+If unspecified, the local port number will default to 0, which tells the OS to allocate a port 
+dynamically (this is fine for the client, since no one needs to remember which port is being used).
+For example, if the client should connect to a Teamech server on port 6666 hosted at example.com,
+using a pad file in the current directory called `teamech.pad` and a dynamically-allocated local
+port, then the command would be  
+`./teamech-desktop example.com:6666 teamech.pad`  
+  
+### Building
+To build either the Teamech server or client, follow these steps:  
+1. Install an up-to-date stable distribution of Rust (per the Rust website, you can do this on most
+Linux distributions by running `curl https://sh.rustup.rs -sSf | sh`).
+2. Clone this repository (`git clone https://github.com/diodelass/Teamech-Server`) and `cd` into
+the main directory (`cd Teamech-Server`).
+3. Run `cargo build --release`.
+4. The binary executable will be written to `Teamech-Server/target/release/teamech-server` where
+it can be run or copied into a `bin/` directory to install it system-wide.  
+  
+## Additional Setup
+In order to work, both the Teamech server and client must use a large symmetric key file, referred
+to elsewhere as a pad file. In theory, any file will work as a pad file, but for optimal security,
+the pad file should be generated using a secure random number generator, and at least twice as large
+as the product of your expected average data throughput and expected pad lifetime (for instance, if
+you plan to send 10 kilobytes of data per day, and want to replace the pad with a new one every year,
+days, then a pad file of around 6 megabytes will suffice). There is no functional requirement to
+replace the pad file, but if your system operates in an area where having your traffic intercepted
+is likely, you should replace it at least this often. You should also replace the pad file for the 
+system immediately in the event that you lose track of one or more of the devices on your network 
+which contain a copy of the pad.  
+On Linux, you can generate a pad file easily using `dd` and `/dev/urandom`. For instance, to create
+a 10-megabyte pad:  
+`dd if=/dev/urandom of=teamech-september-2018.pad bs=1M count=10 status=progress`
+You should then copy this pad file to the server and all clients, and select it as the pad file to
+use at the command line.  
+  
 ### Mobile Support
 No native support for mobile devices is planned - I have no intention of developing an app for 
 Android / iOS or any other smartphone-oriented platform. Extremely basic support for Android may
