@@ -137,3 +137,9 @@ Android / iOS or any other smartphone-oriented platform. Extremely basic support
 eventually be achieved using a client written in Python and an app providing a terminal 
 environment such as Termux, and web-based clients are not out of the question, but smartphones
 are not and will not become a focus of this project.  
+
+### Origin of Name
+The name "Teamech" comes from a naïve and silly mishearing of a voice line from Overwatch, when
+Brigitte activates her ultimate ability. The real line is "Alla till mig!" (Swedish: "Everyone to me!").
+It doesn't really sound like "tea mech" even to the most obtuse American ear, but I guess I had bad 
+speakers when I first played Overwatch.  
