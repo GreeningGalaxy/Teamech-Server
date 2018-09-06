@@ -320,7 +320,7 @@ fn main() {
 			},
 		};
 		let mut inbin:[u8;500]; // recv buffer. payloads longer than 500 bytes will be truncated!
-		let mut subscriptions:HashSet<SocketAddr> = HashSet::new(); // directory of subscribed addresses
+		let mut subscriptions:HashMap<SocketAddr,u64> = HashMap::new(); // directory of subscribed addresses and delivery failures
 		let listener:UdpSocket = match UdpSocket::bind(&format!("0.0.0.0:{}",portn)) {
 			Ok(socket) => socket,
 			Err(why) => {
@@ -418,8 +418,8 @@ fn main() {
 								// Subscription renewal: This is basically a dummy message that
 								// clients can send to the server to have their subscription time
 								// updated without having anything relayed to the others.
-								if subscriptions.contains(&srcaddr) {
-									let _ = subscriptions.insert(srcaddr);
+								if subscriptions.contains_key(&srcaddr) {
+									let _ = subscriptions.insert(srcaddr,0);
 									let _ = sendbytes(&listener,&srcaddr,&vec![0x06]); // ACK
 								} else {
 									let _ = sendbytes(&listener,&srcaddr,&vec![0x15]); // NAK
@@ -501,10 +501,10 @@ fn main() {
 						continue 'processor;
 					}
 					// By this point, the packet is fully verified and can be retransmitted. 
-					if !subscriptions.contains(&srcaddr) {
+					if !subscriptions.contains_key(&srcaddr) {
 						// Let the sender know that they were subscribed if they weren't already
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x02]); // START OF TEXT
-						let _ = subscriptions.insert(srcaddr); // update the activity timestamp for the sender
+						let _ = subscriptions.insert(srcaddr,0); // update the activity timestamp for the sender
 						println!("Client at {} has been subscribed.",srcaddr);
 					}
 					if message.len() == 0 {
@@ -513,7 +513,7 @@ fn main() {
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x02]); // START OF TEXT
 						continue 'processor;
 					}
-					let mut remainingsends:HashSet<SocketAddr> = subscriptions.clone(); // clone the subscribed-clients table into a temporary table
+					let mut remainingsends:HashMap<SocketAddr,u64> = subscriptions.clone(); // clone the subscribed-clients table into a temporary table
 					let _ = remainingsends.remove(&srcaddr); // remove the sender from the clone, to avoid returning to sender unnecessarily
 					if remainingsends.len() == 0 {
 						// If there is no one else on the server, let the client know by
@@ -521,9 +521,11 @@ fn main() {
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x03]); // END OF TEXT
 						continue 'processor;
 					}
-					'sendtry:for _ in 0..10 {
+					'sendtry:for _ in 0..3 {
+					    // If no ACK is received for the first send, try up to three times for each
+					    // client subscriber.
 						let mut iterremaining = remainingsends.clone();
-						'itersend:for knownaddr in iterremaining.iter() {
+						'itersend:for knownaddr in iterremaining.keys() {
 							match sendbytes(&listener,&knownaddr,&recvdata) {
 								Err(why) => {
 									println!("Error while attempting to send to {} - {}.",knownaddr,why.description());
@@ -531,6 +533,11 @@ fn main() {
 								Ok(_) => (),
 							};
 						} // 'itersend
+						// Wait 100 ms before trying to receive ACKs. This does not add latency to
+						// packets sent while the server is idle, but does serve as a rate-limiter
+						// on how fast packets can be relayed.
+						// To go faster, we might eventually write a completely new server using
+						// async, but this will do for now.
 						sleep(Duration::new(0,100_000_000));
 						let mut ackbin:[u8;500] = [0;500];
 						'getacks:loop {
@@ -544,7 +551,12 @@ fn main() {
 								},
 								Ok((nrecv,srcaddr)) => {
 									if nrecv == 1 && ackbin[0] == 0x06 {
+									    // Whenever an ACK comes in, remove that client from the
+									    // list of clients who still haven't gotten the message.
+									    // If that client has any delivery failures counted, clear
+									    // them.
 										let _ = remainingsends.remove(&srcaddr);
+										let _ = subscriptions.insert(srcaddr,0);
 									} else {
 										// if this message wasn't an ACK, push it onto the main
 										// handler's queue so it can be parsed by the main program.
@@ -561,10 +573,18 @@ fn main() {
 					} // 'sendtry
 					println!("Relayed message to {} clients.",subscriptions.len()-1);
 					if remainingsends.len() > 0 {
-						for knownaddr in remainingsends.iter() {
-							println!("Client at {} failed to respond and was unsubscribed.",knownaddr);
-							let _ = subscriptions.remove(&knownaddr);
-							let _ = sendbytes(&listener,&knownaddr,&vec![0x19]); // END OF MEDIUM
+						for knownaddr in remainingsends.keys() {
+						    if let Some(failures) = subscriptions.get_mut(&knownaddr) {
+						        println!("Client at {} failed to acknowledge this message.",knownaddr);
+						        *failures += 1;
+							}
+							if let Some(failures) = subscriptions.clone().get(&knownaddr) {
+						        if *failures > 10 {
+							        println!("Client at {} stopped responding and was unsubscribed.",knownaddr);
+							        let _ = subscriptions.remove(&knownaddr);
+							        let _ = sendbytes(&listener,&knownaddr,&vec![0x19]); // END OF MEDIUM
+							    }
+							}
 						}
 					}
 					if subscriptions.len() > 1 {
