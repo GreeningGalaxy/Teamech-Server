@@ -22,20 +22,33 @@
  * This file contains the source code for the Teamech server, which expects to communicate with
  * Teamech clients. The distribution in which you received this file should also contain the source
  * code for the desktop client.
-*/
-
-/* Server Control Response Codes:
- * 0x01 START OF HEADING - Authentication request response; contains eight-byte authentication nonce
- *					  as payload.
- * 0x02 START OF TEXT - Authentication success. Password/nonce hash received matched correct value.
- * 0x03 END OF TEXT - Sent to a client instead of ACK when that client is the only one connected.
- * 0x06 ACK - Generic acknowledge - Packet was successfully rebroadcast to other subscribers.
- * 0x15 NAK - Generic refusal - Packet was invalid (e.g. bad signature or timestamp) or inappropriate.
- * 0x19 END OF MEDIUM - Subscription invalidity notification. Client needs to re-authenticate
- *						before sending additional data.
- * 0x1A SUBSTITUTE - Server-side error notification. Client message may have been valid, but server
- *					 failed to process it correctly for an unrelated reason (e.g. pad file access
- *					 error).
+ *
+ *
+ * Server Status Response Codes:
+ * 
+ * 0x02 START OF TEXT 
+ *      Subscription entered. Message received decrypted and verified successfully.
+ *
+ * 0x03 END OF TEXT
+ *      Sent to a client instead of ACK when that client is the only subscriber on the server when
+ *      their message was sent. Message was validated and logged, but there was no one to send it
+ *      out to.
+ *
+ * 0x06 ACK
+ *      Message relay acknowledge - Packet was successfully rebroadcast to other subscribers.
+ * 
+ * 0x15 NAK 
+ *      Generic refusal - Packet was invalid (e.g. bad signature or timestamp) or inappropriate
+ *      (e.g. too short to be a valid encrypted payload).
+ * 
+ * 0x19 END OF MEDIUM 
+ *      Subscription invalidity notification. Regardless of previous state, client is now 
+ *      unsubscribed, and needs to re-subscribe by sending a valid encrypted payload if it wants to 
+ *      receive messages.
+ * 
+ * 0x1A SUBSTITUTE 
+ *      Server-side error notification. Client message may have been valid, but the server failed to 
+ *      process it correctly for an unrelated reason (e.g. pad file access error).
  *
 */
 	
