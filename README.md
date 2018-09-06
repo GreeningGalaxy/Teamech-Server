@@ -85,26 +85,10 @@ The server will provide fairly verbose output to stdout every time something hap
 useful to be able to glance over if anything goes wrong. An upcoming version of the server will
 log all of these messages to a file in addition to the console.    
   
-### Client
-There are two clients available for Teamech: the desktop client and the embedded client.  
-The desktop client is intended to serve as the master control interface for the Teamech network's 
-human operator. It uses ncurses to provide a simple scrolling command-line interface somewhat
-reminiscent of console-based IRC clients. You can type messages into a simple input line, and 
-press enter to have them encrypted and sent to the server. When the server replies with a status
-code, the code will appear in hex form on the far right end of the corresponding line.  
-The embedded client lacks the ncurses user interface, and is intended for developing 
-application-specific clients to be run on device controllers, which receive their instructions
-and send responses over Teamech. In its basic form, the embedded client does nothing; it must be
-modified to carry out the task that the embedded controller is used for.
-The desktop console client can be run from the command line like so:  
-`./teamech-desktop [server address:port number] [local port number (optional)] [path to pad file]`
-If unspecified, the local port number will default to 0, which tells the OS to allocate a port 
-dynamically (this is fine for the client, since no one needs to remember which port is being used).
-For example, if the client should connect to a Teamech server on port 6666 hosted at example.com,
-using a pad file in the current directory called `teamech.pad` and a dynamically-allocated local
-port, then the command would be  
-`./teamech-desktop example.com:6666 teamech.pad`  
-  
+### Clients
+There are two clients available for Teamech: the [desktop client](https://github.com/diodelass/Teamech-Desktop "Teamech Desktop") and the 
+[embedded template client](https://github.com/diodelass/Teamech-Embedded-Template "Teamech Embedded Template").  
+
 ### Building
 To build the Teamech server, follow these steps:  
 1. Install an up-to-date stable distribution of Rust (per the Rust website, you can do this on most
@@ -115,22 +99,27 @@ the main directory (`cd Teamech-Server`).
 4. The binary executable will be written to `Teamech-Server/target/release/teamech-server` where
 it can be run or copied into a `bin/` directory to install it system-wide.  
   
-## Additional Setup
+### Additional Setup
 In order to work, both the Teamech server and client must use a large symmetric key file, referred
 to elsewhere as a pad file. In theory, any file will work as a pad file, but for optimal security,
-the pad file should be generated using a secure random number generator, and at least twice as large
-as the product of your expected average data throughput and expected pad lifetime (for instance, if
-you plan to send 10 kilobytes of data per day, and want to replace the pad with a new one every year,
-then a pad file of around 6 megabytes will suffice). There is no functional requirement to
-replace the pad file, but if your system operates in an area where having your traffic intercepted
-is likely, you should replace it at least this often. You should also replace the pad file for the 
-system immediately in the event that you lose track of one or more of the devices on your network 
-which contain a copy of the pad.  
+the pad file should be generated using a secure random number generator.  
+For optimal security, you should replace the pad file and install a new one on all of the network's 
+devices every time the network exchanges a total of about half the pad file's size using that pad.
+This is not operationally necessary, and there are currently no known vulnerabilities that would cause
+failure to update the pads to allow an attacker to gain access to the system or decrypt its messages,
+but by doing this, you ensure that you're at least a moving target should this change.  
+Pad files should be large enough to be reasonably sure of including every possible byte at least once.
+Practically, they should be as large as you can make them while still reasonably holding and transporting
+them using the storage media you have available. A few megabytes is probably reasonable.  
 On Linux, you can generate a pad file easily using `dd` and `/dev/urandom`. For instance, to create
 a 10-megabyte pad:  
 `dd if=/dev/urandom of=teamech-september-2018.pad bs=1M count=10 status=progress`  
 You should then copy this pad file to the server and all clients, and select it as the pad file to
 use at the command line.  
+I make absolutely no guaratees about the security of any Teamech network, no matter what key size 
+and key life cycle practices you adhere to. This software is a personal project to familiarize myself
+with cryptography, network programming, and version control, and you shouldn't trust it in any context.
+You probably shouldn't use it at all, but I can't stop you if you're determined.
   
 ### Mobile Support
 No native support for mobile devices is planned - I have no intention of developing an app for 
