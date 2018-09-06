@@ -505,10 +505,12 @@ fn main() {
 						// Let the sender know that they were subscribed if they weren't already
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x02]); // START OF TEXT
 						let _ = subscriptions.insert(srcaddr); // update the activity timestamp for the sender
+						println!("Client at {} has been subscribed.",srcaddr);
 					}
 					if message.len() == 0 {
 						// If this is an empty message, don't bother relaying it. These types of
 						// messages can be used as subscription requests.
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x02]); // START OF TEXT
 						continue 'processor;
 					}
 					let mut remainingsends:HashSet<SocketAddr> = subscriptions.clone(); // clone the subscribed-clients table into a temporary table
@@ -559,14 +561,17 @@ fn main() {
 					} // 'sendtry
 					println!("Relayed message to {} clients.",subscriptions.len()-1);
 					if remainingsends.len() > 0 {
-						println!("The following clients did not respond and have been unsubscribed:");
 						for knownaddr in remainingsends.iter() {
-							println!("{}",knownaddr);
+							println!("Client at {} failed to respond and was unsubscribed.",knownaddr);
 							let _ = subscriptions.remove(&knownaddr);
 							let _ = sendbytes(&listener,&knownaddr,&vec![0x19]); // END OF MEDIUM
 						}
 					}
-					let _ = sendbytes(&listener,&srcaddr,&vec![0x06]); // ACK
+					if subscriptions.len() > 1 {
+					    let _ = sendbytes(&listener,&srcaddr,&vec![0x06]); // ACK
+					} else {
+					    let _ = sendbytes(&listener,&srcaddr,&vec![0x03]); // END OF TEXT
+					}
 				}, // pop Some
 				None => {
 					sleep(Duration::new(0,10_000_000));
