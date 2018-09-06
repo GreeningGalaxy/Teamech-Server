@@ -127,7 +127,7 @@ system immediately in the event that you lose track of one or more of the device
 which contain a copy of the pad.  
 On Linux, you can generate a pad file easily using `dd` and `/dev/urandom`. For instance, to create
 a 10-megabyte pad:  
-`dd if=/dev/urandom of=teamech-september-2018.pad bs=1M count=10 status=progress`
+`dd if=/dev/urandom of=teamech-september-2018.pad bs=1M count=10 status=progress`  
 You should then copy this pad file to the server and all clients, and select it as the pad file to
 use at the command line.  
   
