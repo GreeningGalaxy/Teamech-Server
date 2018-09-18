@@ -122,11 +122,13 @@ with cryptography, network programming, and version control, and you shouldn't t
 You probably shouldn't use it at all, but I can't stop you if you're determined.
   
 ### Mobile Support
-No native support for mobile devices is planned - I have no intention of developing an app for 
-Android / iOS or any other smartphone-oriented platform. Extremely basic support for Android may
-eventually be achieved using a client written in Python and an app providing a terminal 
-environment such as Termux, and web-based clients are not out of the question, but smartphones
-are not and will not become a focus of this project.  
+A smartphone version of the Teamech client would be a useful tool for operating a Teamech network.
+However, development of such an application is not currently on my roadmap, as I have no experience
+developing for mobile platforms. At such time as this changes, there may eventually be an Android app
+for Teamech. In the meantime, it is possible to compile and run the desktop client using an app such
+as Termux that provides a Unix terminal environment, but this is obviously not very ergonomic.  
+Clients targeting walled-garden platforms such as iOS are not planned and will not be seriously
+considered at this time.
 
 ### Origin of Name
 The name "Teamech" comes from a naïve and silly mishearing of a voice line from Overwatch, when
