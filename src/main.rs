@@ -55,7 +55,9 @@
 extern crate tiny_keccak;
 use tiny_keccak::Keccak;
 extern crate rand;
-use std::env::{args,home_dir};
+extern crate dirs;
+use dirs::home_dir;
+use std::env::args;
 use std::process;
 use std::time::{Duration,SystemTime,UNIX_EPOCH};
 use std::thread::sleep;
