@@ -1,10 +1,10 @@
 /* Teamech Server v0.3
  * August 2018
- * License: GPL v3.0
+ * License: AGPL v3.0
  *
  * This source code is provided with ABSOLUTELY NO WARRANTY. You are fully responsible for any
  * operations that your computers carry out as a result of running this code or anything derived
- * from it. The developer assumes the full absolution of liability described in the GPL v3.0
+ * from it. The developer assumes the full absolution of liability described in the AGPL v3.0
  * license.
  *
  * OVERVIEW
@@ -27,35 +27,35 @@
  * Server Status Response Codes:
  * 
  * 0x02 START OF TEXT 
- *      Subscription entered. Message received decrypted and verified successfully.
+ *	  Subscription entered. Message received decrypted and verified successfully.
  *
  * 0x03 END OF TEXT
- *      Sent to a client instead of ACK when that client is the only subscriber on the server when
- *      their message was sent. Message was validated and logged, but there was no one to send it
- *      out to.
+ *	  Sent to a client instead of ACK when that client is the only subscriber on the server when
+ *	  their message was sent. Message was validated and logged, but there was no one to send it
+ *	  out to.
  *
  * 0x06 ACK
- *      Message relay acknowledge - Packet was successfully rebroadcast to other subscribers.
+ *	  Message relay acknowledge - Packet was successfully rebroadcast to other subscribers.
  * 
  * 0x15 NAK 
- *      Generic refusal - Packet was invalid (e.g. bad signature or timestamp) or inappropriate
- *      (e.g. too short to be a valid encrypted payload).
+ *	  Generic refusal - Packet was invalid (e.g. bad signature or timestamp) or inappropriate
+ *	  (e.g. too short to be a valid encrypted payload).
  * 
  * 0x19 END OF MEDIUM 
- *      Subscription invalidity notification. Regardless of previous state, client is now 
- *      unsubscribed, and needs to re-subscribe by sending a valid encrypted payload if it wants to 
- *      receive messages.
+ *	  Subscription invalidity notification. Regardless of previous state, client is now 
+ *	  unsubscribed, and needs to re-subscribe by sending a valid encrypted payload if it wants to 
+ *	  receive messages.
  * 
  * 0x1A SUBSTITUTE 
- *      Server-side error notification. Client message may have been valid, but the server failed to 
- *      process it correctly for an unrelated reason (e.g. pad file access error).
+ *	  Server-side error notification. Client message may have been valid, but the server failed to 
+ *	  process it correctly for an unrelated reason (e.g. pad file access error).
  *
 */
-	
+		
 extern crate tiny_keccak;
 use tiny_keccak::Keccak;
 extern crate rand;
-use std::env::args;
+use std::env::{args,home_dir};
 use std::process;
 use std::time::{Duration,SystemTime,UNIX_EPOCH};
 use std::thread::sleep;
@@ -65,12 +65,13 @@ use std::io::prelude::*;
 use std::net::{UdpSocket,SocketAddr,IpAddr};
 use std::collections::{HashMap,HashSet,VecDeque};
 use std::fs;
-use std::path::Path;
+use std::path::{Path,PathBuf};
 
 // Default Parameters
-static MAX_PACKET_DELAY:u64 = 5_000;    // Maximum amount of time in the past or future a packet's timestamp can be in order to validate.
+static MAX_PACKET_DELAY:u64 = 5_000;	// Maximum amount of time in the past or future a packet's timestamp can be in order to validate.
 static MAX_BANNABLE_OFFENSES:u64 = 10;  // Maximum number of times a client can misstep before having their IP banned.
 static MAX_DELIVERY_FAILURES:u64 = 5;   // Maximum number of times a client can fail to respond to a delivery before being dropped.
+static LOG_DIRECTORY:&str = ".teamech-logs/server";
 
 // systime function; gets the unixtime in milliseconds.
 fn systime() -> u64 {
@@ -85,6 +86,55 @@ fn systime() -> u64 {
 			return 0;
 		},
 	};
+}
+
+// humantime accepts a unix timestamp and a GMT offset and produces a string in nearly-ISO time format.
+fn humantime(systemtime:u64,tz:f64) -> String {
+	let utime:u64 = ((systemtime as f64)+(3_600_000.0*(24.0+tz))) as u64;
+	let days:u64 = utime/(1000*60*60*24);
+	let years:u64 = 1970+(((utime/(1000*60*60*24)) as f64)/(365.25f64)) as u64;
+	let yeardays:u64 = (days as f64 % 365.25) as u64;
+	let monthdefs:[u64;12] = match years%4 {
+		0 => [31,29,31,30,31,30,31,31,30,31,30,31],
+		_ => [31,28,31,30,31,30,31,31,30,31,30,31],
+	};
+	let mut month:u64 = 1;
+	let mut day:u64 = yeardays;
+	for i in 0..12 {
+		if day < monthdefs[i] {
+			break;
+		} else {
+			day -= monthdefs[i];
+			month += 1;
+		}
+	}
+	let daysecond:u64 = (utime/1000)%(3600*24);
+	let hour:u64 = daysecond/3600;
+	let minute:u64 = (daysecond/60)%60;
+	let second:u64 = daysecond%60;
+	let stringyear:String = years.to_string();
+	let stringmonth:String = match month<10 {
+		true  => format!("0{}",month),
+		false => format!("{}",month),
+	};
+	let stringday:String = match day<10 {
+		true  => format!("0{}",day),
+		false => format!("{}",day),
+	};
+	let stringhour:String = match hour<10 {
+		true  => format!("0{}",hour),
+		false => format!("{}",hour),
+	};
+	let stringminute:String = match minute<10 {
+		true  => format!("0{}",minute),
+		false => format!("{}",minute),
+	};
+	let stringsecond:String = match second<10 {
+		true  => format!("0{}",second),
+		false => format!("{}",second),
+	};
+	let result:String = format!("{}-{}-{} {}:{}:{}",stringyear,stringmonth,stringday,stringhour,stringminute,stringsecond);
+	return result;
 }
 
 // int2bytes takes a single 64-bit int and converts it into an array of eight bytes. I'm pretty
@@ -126,6 +176,37 @@ fn bytes2hex(v:&Vec<u8>) -> String {
 		}
 	}
 	return result;
+}
+
+// Accepts a path to a log file, and writes a line to it, generating a machine-readable log.
+fn logtofile(logfilename:&Path,logstring:&str) -> Result<(),io::Error> {
+	let userhome:PathBuf = match home_dir() {
+		None => PathBuf::new(),
+		Some(pathbuf) => pathbuf,
+	};
+	let logdir:&Path = &userhome.as_path().join(&LOG_DIRECTORY);
+	match fs::create_dir_all(&logdir) {
+		Err(why) => return Err(why),
+		Ok(_) => (),
+	};
+	let logpath:&Path = &logdir.join(&logfilename);
+	let mut logfile = match fs::OpenOptions::new() 
+										.append(true)
+										.open(&logpath) {
+		Ok(file) => file,
+		Err(why) => match why.kind() {
+			io::ErrorKind::NotFound => match fs::File::create(&logpath) {
+				Ok(file) => file,
+				Err(why) => return Err(why),
+			},
+			_ => return Err(why),
+		},
+	};
+	let timestamp:u64 = systime();
+	match writeln!(logfile,"[{}][{}] {}",timestamp,humantime(timestamp,0.0),&logstring) {
+		Ok(_) => return Ok(()),
+		Err(why) => return Err(why),
+	};
 }
 
 // Generates a single-use encryption key from a provided key size, pad file and authentication 
@@ -289,23 +370,23 @@ fn sendraw(listener:&UdpSocket,destaddr:&SocketAddr,payload:&Vec<u8>) -> Result<
 
 // Automatically encrypts a vector of bytes and sends them over the socket.
 fn sendbytes(listener:&UdpSocket,destaddr:&SocketAddr,bytes:&Vec<u8>,padpath:&Path) -> Result<(),io::Error> {
-    let mut stampedbytes = bytes.clone();
-    stampedbytes.append(&mut int2bytes(&systime()).to_vec());
+	let mut stampedbytes = bytes.clone();
+	stampedbytes.append(&mut int2bytes(&systime()).to_vec());
 	let payload = match encrypt(&stampedbytes,&padpath) {
-	    Err(why) => {
-	        println!("Could not encrypt bytes - {}",why.description());
-	        return Err(why);
-	    },
-	    Ok(b) => b,
+		Err(why) => {
+			println!("Could not encrypt bytes - {}",why.description());
+			return Err(why);
+		},
+		Ok(b) => b,
 	};
 	return sendraw(&listener,&destaddr,&payload);
 }
 
 #[derive(Clone)]
 struct Subscription {
-    lastact:u64,
-    pendingack:bool,
-    deliveryfailures:u64,
+	lastact:u64,
+	pendingack:bool,
+	deliveryfailures:u64,
 }
 
 fn main() {
@@ -338,6 +419,9 @@ fn main() {
 		println!("Could not parse first argument as a port number. Expected an integer between 0 and 65536.");
 		process::exit(1);
 	}
+
+	let logfilename:String = format!("{}-teamech-server.log",humantime(systime(),0.0));
+	let logfile:&Path = Path::new(&logfilename);
 	let padpath:&Path = Path::new(&argv[2]);	
 	// Spam detection and auth equipment. 
 	let mut banpoints:HashMap<IpAddr,u64> = HashMap::new();
@@ -345,9 +429,17 @@ fn main() {
 	// Recovery loop: if an unignorable error occurs that requires restarting, we can `break` the inner loops
 	// to wait a set delay before restarting, or `continue` the 'recovery loop to restart immediately.
 	'recovery:loop {
+		match logtofile(&logfile,&format!("Opened log file.")) {
+			Err(why) => {
+				println!("WARNING: Could not open log file at {} - {}. Logs are currently NOT BEING SAVED - you should fix this!",
+																								logfile.display(),why.description());
+			},
+			Ok(_) => (),
+		};
 		match fs::File::open(&padpath) {
 			Err(why) => {
 				println!("Could not open specified pad file - {}",why.description());
+				let _ = logtofile(&logfile,&format!("Crash due to local failure to open pad file at {}: {}",padpath.display(),why.description()));
 				process::exit(1);
 			},
 			Ok(_) => {
@@ -363,6 +455,7 @@ fn main() {
 				// port. Something's probably blocking it, which the user will need to clear before
 				// this program can run.
 				println!("Could not bind to local address: {}",why.description());
+				let _ = logtofile(&logfile,&format!("Crash due to local failure to bind to local address: {}",why.description()));
 				process::exit(1);
 			},
 		};
@@ -375,6 +468,7 @@ fn main() {
 				// but it would probably be a platform compatibility-related error, and not
 				// something we can fix here.
 				println!("Could not set socket to nonblocking mode: {}",why.description());
+				let _ = logtofile(&logfile,&format!("Crash due to local failure to get non-blocking read access from the socket: {}",why.description()));
 				process::exit(1);
 			},
 		};
@@ -382,6 +476,7 @@ fn main() {
 		// conditions requiring the system to be reset (e.g. loss of connectivity) can break the
 		// loop, and execution will be caught by the recovery loop and returned to the top.
 		println!("{} Server startup complete. Listening for subscription requests...",systime());
+		let _ = logtofile(&logfile,&format!("Completion of startup sequence."));
 		let mut inqueue:VecDeque<(SocketAddr,Vec<u8>)> = VecDeque::new();
 		'processor:loop {
 			sleep(Duration::new(0,1_000_000));
@@ -400,6 +495,7 @@ fn main() {
 						// supposed to run unsupervised, we'll just let the recovery loop catch us
 						// and try to start again, rather than exiting. 
 						println!("{} Error: Recv operation on socket failed - {}",systime(),why.description());
+						let _ = logtofile(&logfile,&format!("Local read error on socket: {}",why.description()));
 						break 'processor;
 					},
 				},
@@ -407,6 +503,7 @@ fn main() {
 			for sub in subscriptions.iter_mut() {
 				if sub.1.pendingack && sub.1.lastact+MAX_PACKET_DELAY*2 < systime() {
 					println!("{} Client at {} failed to acknowledge the most recent messages [{}].",systime(),sub.0,sub.1.deliveryfailures+1);
+					let _ = logtofile(&logfile,&format!("Delivery failure to client at {} [{} failures so far]",sub.0,sub.1.deliveryfailures+1));
 					sub.1.deliveryfailures += 1;
 					sub.1.pendingack = false;
 				} 
@@ -414,6 +511,8 @@ fn main() {
 			for sub in subscriptions.clone().iter() {
 				if sub.1.deliveryfailures > MAX_DELIVERY_FAILURES {
 					println!("{} Client at {} stopped responding and was unsubscribed.",systime(),sub.0);
+					let _ = logtofile(&logfile,&format!("Termination of subscription for client at {} for exceeding {} delivery failures",
+																												sub.0,MAX_DELIVERY_FAILURES));
 					let _ = subscriptions.remove(&sub.0);
 					let _ = sendbytes(&listener,&sub.0,&vec![0x19],&padpath); // END OF MEDIUM
 				}
@@ -463,6 +562,7 @@ fn main() {
 								// signed message. This is grounds for summary deauthentication.
 								println!("{} Failed to verify packet received from {} - {}.",systime(),srcaddr,why.description());
 								println!("{} Terminating subscription to {} due to verification failure.",systime(),srcaddr);
+								let _ = logtofile(&logfile,&format!("Invalid packet from client at {}, subscription terminated",srcaddr));
 								let _ = sendbytes(&listener,&srcaddr,&vec![0x19],&padpath); // END OF MEDIUM
 								let _ = subscriptions.remove(&srcaddr);
 								if let Some(points) = banpoints.get_mut(&srcaddr.ip()) {
@@ -476,6 +576,8 @@ fn main() {
 								// bannable or deauthenticable offense; instead, we simply notify
 								// the sender that the server is having trouble.
 								println!("{} Failed to decrypt packet received from {} - {}.",systime(),srcaddr,why.description());
+								let _ = logtofile(&logfile,&format!("Local decryption failure of packet received from {}: {}",
+																									srcaddr,why.description()));
 								let _ = sendbytes(&listener,&srcaddr,&vec![0x1A],&padpath); // SUBSTITUTE (server-side error)
 								continue 'processor;
 							},
@@ -484,7 +586,8 @@ fn main() {
 					};
 					let message:Vec<u8> = stampedmessage[0..stampedmessage.len()-8].to_vec();
 					if message.len() > 1 {
-					    println!("{} {} -> {} [{}]",systime(),srcaddr,String::from_utf8_lossy(&message),bytes2hex(&message));
+						println!("{} {} -> {} [{}]",systime(),srcaddr,String::from_utf8_lossy(&message),bytes2hex(&message));
+						let _ = logtofile(&logfile,&format!("{} -> {} [{}]",srcaddr,String::from_utf8_lossy(&message),bytes2hex(&message)));
 					}
 					// Reaching this point means the message decrypted and validated successfully.
 					// However, we still need to verify the timestamp to make sure this isn't a
@@ -498,6 +601,7 @@ fn main() {
 						// attack, but we'll reject it anyway just to be on the safe side.
 						println!("{} Packet from {} supposedly had a timestamp {} ms in the future. Rejecting; please check your clocks.",
 																								systime(),srcaddr,inttimestamp-systime());
+						let _ = logtofile(&logfile,&format!("Packet rejection to {} due to future timestamp [{} ms]",srcaddr,inttimestamp-systime()));
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 						continue 'processor;
 					} else if systime() > inttimestamp+MAX_PACKET_DELAY {
@@ -505,7 +609,8 @@ fn main() {
 						// timestamp is too far in the past. This means we need to reject the
 						// packet, since it could be used to confuse clients maliciously.
 						println!("{} Message from {} has a timestamp {} ms in the past, which is too long. Rejecting.",
-						                                            systime(),srcaddr,systime()-bytes2int(&timestamp));
+																			systime(),srcaddr,systime()-inttimestamp);
+						let _ = logtofile(&logfile,&format!("Packet rejection to {} due to past timestamp [{} ms]",srcaddr,systime()-inttimestamp));
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 						continue 'processor;
 					}
@@ -514,16 +619,15 @@ fn main() {
 						// Let the sender know that they were subscribed if they weren't already
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x02],&padpath); // START OF TEXT
 						println!("{} Client at {} has been subscribed.",systime(),srcaddr);
+						let _ = logtofile(&logfile,&format!("Establishment of subscription by {}",srcaddr));
 					}
 					// Insert the new subscription, or reset the sender's existing subscription 
-					// status to keep it current. Note that this is the only way to clear delivery 
-					// failures (by sending a valid encrypted message) - simply acknowledging
-					// messages sent will reset the last-seen time and pending-ack status, but will
-					// not clear delivery failures.
+					// status to keep it current.
 					if let Some(sub) = subscriptions.get_mut(&srcaddr) {
-					    if sub.deliveryfailures > 0 {
-					        println!("Resetting delivery failure count for host {} to 0 (was {})",srcaddr,sub.deliveryfailures);
-					    }
+						if sub.deliveryfailures > 0 {
+							println!("Resetting delivery failure count for host {} to 0 (was {})",srcaddr,sub.deliveryfailures);
+							let _ = logtofile(&logfile,&format!("Reset of delivery failure count for {} from {}",srcaddr,sub.deliveryfailures));
+						}
 					}
 					let _ = subscriptions.insert(srcaddr,Subscription{lastact:systime(),pendingack:false,deliveryfailures:0});
 					if message.len() == 0 {
@@ -547,20 +651,22 @@ fn main() {
 								// Whenever a subscription is cancelled for any reason, we send END
 								// OF MEDIUM; the client can react to this however they like. 
 								println!("{} Subscription canceled by {}",systime(),srcaddr);
+								let _ = logtofile(&logfile,&format!("Cancellation of subscription from {}",srcaddr));
 								let _ = subscriptions.remove(&srcaddr);
 								let _ = sendbytes(&listener,&srcaddr,&vec![0x19],&padpath); // END OF MEDIUM
 							},
 							0x06 => {
-                                if let Some(sub) = subscriptions.get_mut(&srcaddr) {
-                                    sub.pendingack = false;
-                                    sub.lastact = systime();
-                                } else {
-                                    let _ = sendbytes(&listener,&srcaddr,&vec![0x19],&padpath); // END OF MEDIUM
-                                }
+								if let Some(sub) = subscriptions.get_mut(&srcaddr) {
+									sub.pendingack = false;
+									sub.lastact = systime();
+								} else {
+									let _ = sendbytes(&listener,&srcaddr,&vec![0x19],&padpath); // END OF MEDIUM
+								}
 							},
 							other => {
 								// Unimplemented control code? NAK response for now.
 								println!("{} Host {} sent unknown control packet {}",systime(),srcaddr,bytes2hex(&vec![other]));
+								let _ = logtofile(&logfile,&format!("Unknown control packet {} from {}",bytes2hex(&vec![other]),srcaddr));
 								let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 							},
 						}; // match recvdata[0]
@@ -582,20 +688,21 @@ fn main() {
 								println!("{} Error while attempting to send to {} - {}.",systime(),destaddr,why.description());
 							},
 							Ok(_) => {
-							    if let Some(sub) = subscriptions.get_mut(&destaddr) {
-							        if !sub.pendingack {
-    							        sub.pendingack = true;
-	    						        sub.lastact = systime();
-	    						    }
-							    }
+								if let Some(sub) = subscriptions.get_mut(&destaddr) {
+									if !sub.pendingack {
+										sub.pendingack = true;
+										sub.lastact = systime();
+									}
+								}
 							},
 						};
 					} // 'itersend
 					println!("{} Relayed message to {} clients.",systime(),subscriptions.len()-1);
+					let _ = logtofile(&logfile,&format!("Acknowledgement of retransmission by {} clients",subscriptions.len()-1));
 					if subscriptions.len() > 1 {
-					    let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&padpath); // ACK
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&padpath); // ACK
 					} else {
-					    let _ = sendbytes(&listener,&srcaddr,&vec![0x03],&padpath); // END OF TEXT
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x03],&padpath); // END OF TEXT
 					}
 				}, // pop Some
 				None => {
