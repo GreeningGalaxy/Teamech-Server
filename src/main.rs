@@ -179,7 +179,7 @@ fn logtofile(logfilename:&Path,logstring:&str,timestamp:DateTime<Local>) -> Resu
 			_ => return Err(why),
 		},
 	};
-	match writeln!(logfile,"[{}][{}] {}",timestamp.timestamp(),timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),&logstring) {
+	match writeln!(logfile,"[{}][{}] {}",timestamp.timestamp_millis(),timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),&logstring) {
 		Ok(_) => return Ok(()),
 		Err(why) => return Err(why),
 	};
@@ -189,7 +189,7 @@ fn logtofile(logfilename:&Path,logstring:&str,timestamp:DateTime<Local>) -> Resu
 // message to the console and returns nothing.
 fn log(logfilename:&Path,logstring:&str) {
 	let timestamp:DateTime<Local> = Local::now();
-	println!("[{}][{}] {}",timestamp.timestamp(),timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),&logstring);
+	println!("[{}][{}] {}",timestamp.timestamp_millis(),timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),&logstring);
 	match logtofile(&logfilename,&logstring,timestamp) {
 		Err(why) => {
 			println!("ERROR: Failed to write to log file at {}: {}",logfilename.display(),why.description());
@@ -345,11 +345,11 @@ fn sendraw(listener:&UdpSocket,destaddr:&SocketAddr,payload:&Vec<u8>) -> Result<
 				// WouldBlock for a send operation usually means that the transmit buffer is full.
 				io::ErrorKind::Interrupted => (),
 				io::ErrorKind::WouldBlock => {
-					println!("{} Error: failed to send byte - transmit buffer overflow!",Local::now().timestamp());
+					println!("{} Error: failed to send byte - transmit buffer overflow!",Local::now().format("%Y-%m-%d %H:%M:%S"));
 					return Err(why);
 				},
 				_ => {
-					println!("{} Error: failed to send byte - {}",Local::now().timestamp(),why.description());
+					println!("{} Error: failed to send byte - {}",Local::now().format("%Y-%m-%d %H:%M:%S"),why.description());
 					return Err(why);
 				},
 			},
@@ -360,7 +360,7 @@ fn sendraw(listener:&UdpSocket,destaddr:&SocketAddr,payload:&Vec<u8>) -> Result<
 // Automatically encrypts a vector of bytes and sends them over the socket.
 fn sendbytes(listener:&UdpSocket,destaddr:&SocketAddr,bytes:&Vec<u8>,padpath:&Path) -> Result<(),io::Error> {
 	let mut stampedbytes = bytes.clone();
-	stampedbytes.append(&mut i64_bytes(&Local::now().timestamp()).to_vec());
+	stampedbytes.append(&mut i64_bytes(&Local::now().timestamp_millis()).to_vec());
 	let payload = match encrypt(&stampedbytes,&padpath) {
 		Err(why) => {
 			println!("Could not encrypt bytes - {}",why.description());
@@ -485,7 +485,7 @@ fn main() {
 				},
 			}; // match recvfrom
 			for sub in subscriptions.iter_mut() {
-				if sub.1.pendingack && sub.1.lastact+MAX_PACKET_DELAY*2 < Local::now().timestamp() {
+				if sub.1.pendingack && sub.1.lastact+MAX_PACKET_DELAY*2 < Local::now().timestamp_millis() {
 					log(&logfile,&format!("Delivery failure to client at {} [{} failures so far]",sub.0,sub.1.deliveryfailures+1));
 					sub.1.deliveryfailures += 1;
 					sub.1.pendingack = false;
@@ -573,18 +573,18 @@ fn main() {
 					let mut timestamp:[u8;8] = [0;8];
 					timestamp.copy_from_slice(&stampedmessage[stampedmessage.len()-8..stampedmessage.len()]);
 					let inttimestamp:i64 = bytes_i64(&timestamp);
-					if inttimestamp > Local::now().timestamp()+MAX_PACKET_DELAY {
+					if inttimestamp > Local::now().timestamp_millis()+MAX_PACKET_DELAY {
 						// Packet timestamp more than the allowed delay into the future? This is a
 						// very weird and unlikely case, probably a clock sync error and not an
 						// attack, but we'll reject it anyway just to be on the safe side.
-						log(&logfile,&format!("Packet rejection to {} due to future timestamp [{} ms]",srcaddr,inttimestamp-Local::now().timestamp()));
+						log(&logfile,&format!("Packet rejection to {} due to future timestamp [{} ms]",srcaddr,inttimestamp-Local::now().timestamp_millis()));
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 						continue 'processor;
-					} else if Local::now().timestamp() > inttimestamp+MAX_PACKET_DELAY {
+					} else if Local::now().timestamp_millis() > inttimestamp+MAX_PACKET_DELAY {
 						// This is the most likely situation in an actual replay attack - the
 						// timestamp is too far in the past. This means we need to reject the
 						// packet, since it could be used to confuse clients maliciously.
-						log(&logfile,&format!("Packet rejection to {} due to past timestamp [{} ms]",srcaddr,Local::now().timestamp()-inttimestamp));
+						log(&logfile,&format!("Packet rejection to {} due to past timestamp [{} ms]",srcaddr,Local::now().timestamp_millis()-inttimestamp));
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 						continue 'processor;
 					}
@@ -601,7 +601,7 @@ fn main() {
 							log(&logfile,&format!("Reset of delivery failure count for {} from {}",srcaddr,sub.deliveryfailures));
 						}
 					}
-					let _ = subscriptions.insert(srcaddr,Subscription{lastact:Local::now().timestamp(),pendingack:false,deliveryfailures:0});
+					let _ = subscriptions.insert(srcaddr,Subscription{lastact:Local::now().timestamp_millis(),pendingack:false,deliveryfailures:0});
 					if message.len() == 0 {
 						// If this is an empty message, don't bother relaying it. These types of
 						// messages can be used as subscription requests.
@@ -629,7 +629,7 @@ fn main() {
 							0x06 => {
 								if let Some(sub) = subscriptions.get_mut(&srcaddr) {
 									sub.pendingack = false;
-									sub.lastact = Local::now().timestamp();
+									sub.lastact = Local::now().timestamp_millis();
 								} else {
 									let _ = sendbytes(&listener,&srcaddr,&vec![0x19],&padpath); // END OF MEDIUM
 								}
@@ -661,7 +661,7 @@ fn main() {
 								if let Some(sub) = subscriptions.get_mut(&destaddr) {
 									if !sub.pendingack {
 										sub.pendingack = true;
-										sub.lastact = Local::now().timestamp();
+										sub.lastact = Local::now().timestamp_millis();
 									}
 								}
 							},
