@@ -50,6 +50,19 @@
  *	  Server-side error notification. Client message may have been valid, but the server failed to 
  *	  process it correctly for an unrelated reason (e.g. pad file access error).
  *
+
+Cargo.toml:
+[package]
+name = "teamech-server"
+version = "0.4.0"
+authors = ["ellie"]
+
+[dependencies]
+tiny-keccak = "1.4.2"
+rand = "0.3"
+dirs = "1.0.3"
+chrono = "0.4"
+byteorder = "1"
 */
 		
 extern crate tiny_keccak;
