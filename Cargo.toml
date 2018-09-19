@@ -6,3 +6,6 @@ authors = ["ellie"]
 [dependencies]
 tiny-keccak = "1.4.2"
 rand = "0.3"
+dirs = "1.0.3"
+chrono = "0.4"
+byteorder = "1"

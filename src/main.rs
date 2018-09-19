@@ -57,9 +57,13 @@ use tiny_keccak::Keccak;
 extern crate rand;
 extern crate dirs;
 use dirs::home_dir;
+extern crate chrono;
+use chrono::prelude::*;
+use std::time::Duration;
+extern crate byteorder;
+use byteorder::{LittleEndian,ReadBytesExt,WriteBytesExt};
 use std::env::args;
 use std::process;
-use std::time::{Duration,SystemTime,UNIX_EPOCH};
 use std::thread::sleep;
 use std::error::Error;
 use std::io;
@@ -70,95 +74,53 @@ use std::fs;
 use std::path::{Path,PathBuf};
 
 // Default Parameters
-static MAX_PACKET_DELAY:u64 = 5_000;	// Maximum amount of time in the past or future a packet's timestamp can be in order to validate.
+static MAX_PACKET_DELAY:i64 = 5_000;	// Maximum amount of time in the past or future a packet's timestamp can be in order to validate.
 static MAX_BANNABLE_OFFENSES:u64 = 10;  // Maximum number of times a client can misstep before having their IP banned.
 static MAX_DELIVERY_FAILURES:u64 = 5;   // Maximum number of times a client can fail to respond to a delivery before being dropped.
 static LOG_DIRECTORY:&str = ".teamech-logs/server";
 
-// systime function; gets the unixtime in milliseconds.
-fn systime() -> u64 {
-	match SystemTime::now().duration_since(UNIX_EPOCH) {
-		Ok(time) => {
-			return time.as_secs()*1_000 + (time.subsec_nanos() as u64)/1_000_000 ;
-		},
+fn i64_bytes(number:&i64) -> [u8;8] {
+	let mut bytes:[u8;8] = [0;8];
+	match bytes.as_mut().write_i64::<LittleEndian>(*number) {
 		Err(why) => {
-			// If there's a problem getting the system time (probably a platform thing) then this
-			// is going to return 0, which corresponds to midnight on January 1st, 1970. Watch out!
-			println!("Error while getting system time: {}",why.description());
-			return 0;
+			println!("FATAL: Could not convert integer to little-endian bytes: {}",why.description());
+			process::exit(1);
 		},
+		Ok(_) => (),
+	};
+	return bytes;
+}
+
+fn u64_bytes(number:&u64) -> [u8;8] {
+	let mut bytes:[u8;8] = [0;8];
+	match bytes.as_mut().write_u64::<LittleEndian>(*number) {
+		Err(why) => {
+			println!("FATAL: Could not convert integer to little-endian bytes: {}",why.description());
+			process::exit(1);
+		},
+		Ok(_) => (),
+	};
+	return bytes;
+}
+
+fn bytes_i64(bytes:&[u8;8]) -> i64 {
+	return match bytes.as_ref().read_i64::<LittleEndian>() {
+		Err(why) => {
+			println!("FATAL: Could not convert little-endian bytes to integer: {}",why.description());
+			process::exit(1);
+		},
+		Ok(n) => n,
 	};
 }
 
-// humantime accepts a unix timestamp and a GMT offset and produces a string in nearly-ISO time format.
-fn humantime(systemtime:u64,tz:f64) -> String {
-	let utime:u64 = ((systemtime as f64)+(3_600_000.0*(24.0+tz))) as u64;
-	let days:u64 = utime/(1000*60*60*24);
-	let years:u64 = 1970+(((utime/(1000*60*60*24)) as f64)/(365.25f64)) as u64;
-	let yeardays:u64 = (days as f64 % 365.25) as u64;
-	let monthdefs:[u64;12] = match years%4 {
-		0 => [31,29,31,30,31,30,31,31,30,31,30,31],
-		_ => [31,28,31,30,31,30,31,31,30,31,30,31],
+fn bytes_u64(bytes:&[u8;8]) -> u64 {
+	return match bytes.as_ref().read_u64::<LittleEndian>() {
+		Err(why) => {
+			println!("FATAL: Could not convert little-endian bytes to integer: {}",why.description());
+			process::exit(1);
+		},
+		Ok(n) => n,
 	};
-	let mut month:u64 = 1;
-	let mut day:u64 = yeardays;
-	for i in 0..12 {
-		if day < monthdefs[i] {
-			break;
-		} else {
-			day -= monthdefs[i];
-			month += 1;
-		}
-	}
-	let daysecond:u64 = (utime/1000)%(3600*24);
-	let hour:u64 = daysecond/3600;
-	let minute:u64 = (daysecond/60)%60;
-	let second:u64 = daysecond%60;
-	let stringyear:String = years.to_string();
-	let stringmonth:String = match month<10 {
-		true  => format!("0{}",month),
-		false => format!("{}",month),
-	};
-	let stringday:String = match day<10 {
-		true  => format!("0{}",day),
-		false => format!("{}",day),
-	};
-	let stringhour:String = match hour<10 {
-		true  => format!("0{}",hour),
-		false => format!("{}",hour),
-	};
-	let stringminute:String = match minute<10 {
-		true  => format!("0{}",minute),
-		false => format!("{}",minute),
-	};
-	let stringsecond:String = match second<10 {
-		true  => format!("0{}",second),
-		false => format!("{}",second),
-	};
-	let result:String = format!("{}-{}-{} {}:{}:{}",stringyear,stringmonth,stringday,stringhour,stringminute,stringsecond);
-	return result;
-}
-
-// int2bytes takes a single 64-bit int and converts it into an array of eight bytes. I'm pretty
-// sure this should actually work consistently between endiannesses, but Teamech won't interoperate
-// between systems of different endianness without platform-specific modification. (Teamech
-// messages always operate in little endian.)
-fn int2bytes(n:&u64) -> [u8;8] {
-	let mut result:[u8;8] = [0;8];
-	for i in 0..8 {
-		result[7-i] = (0xFF & (*n >> i*8)) as u8;
-	}
-	return result;
-}
-
-// bytes2int is, unsurprisingly, the inverse function of int2bytes, which takes an array of 8 bytes
-// and converts it into a single 64-bit int. The same endianness considerations as above apply.
-fn bytes2int(b:&[u8;8]) -> u64 {
-	let mut result:u64 = 0;
-	for i in 0..8 {
-		result += (b[i] as u64)*2u64.pow(((7-i) as u32)*8u32);
-	}
-	return result;
 }
 
 // bytes2hex converts a vector of bytes into a hexadecimal string. This is used mainly for
@@ -180,8 +142,8 @@ fn bytes2hex(v:&Vec<u8>) -> String {
 	return result;
 }
 
-// Accepts a path to a log file, and writes a line to it, generating a machine-readable log.
-fn logtofile(logfilename:&Path,logstring:&str,timestamp:u64) -> Result<(),io::Error> {
+// Accepts a path to a log file, and writes a line to it, generating a human- and machine-readable log.
+fn logtofile(logfilename:&Path,logstring:&str,timestamp:DateTime<Local>) -> Result<(),io::Error> {
 	let userhome:PathBuf = match home_dir() {
 		None => PathBuf::new(),
 		Some(pathbuf) => pathbuf,
@@ -204,7 +166,7 @@ fn logtofile(logfilename:&Path,logstring:&str,timestamp:u64) -> Result<(),io::Er
 			_ => return Err(why),
 		},
 	};
-	match writeln!(logfile,"[{}][{}] {}",timestamp,humantime(timestamp,0.0),&logstring) {
+	match writeln!(logfile,"[{}][{}] {}",timestamp.timestamp(),timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),&logstring) {
 		Ok(_) => return Ok(()),
 		Err(why) => return Err(why),
 	};
@@ -213,8 +175,8 @@ fn logtofile(logfilename:&Path,logstring:&str,timestamp:u64) -> Result<(),io::Er
 // Error-handling wrapper for logtofile() - rather than returning an error, prints the error
 // message to the console and returns nothing.
 fn log(logfilename:&Path,logstring:&str) {
-	let timestamp:u64 = systime();
-	println!("[{}][{}] {}",timestamp,humantime(timestamp,0.0),&logstring);
+	let timestamp:DateTime<Local> = Local::now();
+	println!("[{}][{}] {}",timestamp.timestamp(),timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),&logstring);
 	match logtofile(&logfilename,&logstring,timestamp) {
 		Err(why) => {
 			println!("ERROR: Failed to write to log file at {}: {}",logfilename.display(),why.description());
@@ -255,7 +217,7 @@ fn keygen(nonce:&[u8;8],padpath:&Path,keysize:&usize) -> Result<(Vec<u8>,Vec<u8>
 		}
 		sha3.finalize(&mut newseednonce);
 		seednonce = newseednonce;
-		let _ = padfile.seek(io::SeekFrom::Start(bytes2int(&seednonce) % padsize));
+		let _ = padfile.seek(io::SeekFrom::Start(bytes_u64(&seednonce) % padsize));
 		let _ = padfile.read_exact(&mut inbin);
 		seed[x] = inbin[0];
 	}
@@ -274,7 +236,7 @@ fn keygen(nonce:&[u8;8],padpath:&Path,keysize:&usize) -> Result<(Vec<u8>,Vec<u8>
 		}
 		sha3.finalize(&mut newkeynonce);
 		keynonce = newkeynonce;
-		let _ = padfile.seek(io::SeekFrom::Start(bytes2int(&keynonce) % padsize));
+		let _ = padfile.seek(io::SeekFrom::Start(bytes_u64(&keynonce) % padsize));
 		let _ = padfile.read_exact(&mut inbin);
 		keybytes.push(inbin[0]);
 	}
@@ -286,7 +248,7 @@ fn keygen(nonce:&[u8;8],padpath:&Path,keysize:&usize) -> Result<(Vec<u8>,Vec<u8>
 // signature, and nonce).
 fn encrypt(message:&Vec<u8>,padpath:&Path) -> Result<Vec<u8>,io::Error> {
 	let nonce:u64 = rand::random::<u64>();
-	let noncebytes:[u8;8] = int2bytes(&nonce);
+	let noncebytes:[u8;8] = u64_bytes(&nonce);
 	let keysize:usize = message.len()+8;
 	// Use the keygen function to create a key of length n + 8, where n is the length of the
 	// message to be encrypted. (The extra eight bytes are for encrypting the signature.)
@@ -370,11 +332,11 @@ fn sendraw(listener:&UdpSocket,destaddr:&SocketAddr,payload:&Vec<u8>) -> Result<
 				// WouldBlock for a send operation usually means that the transmit buffer is full.
 				io::ErrorKind::Interrupted => (),
 				io::ErrorKind::WouldBlock => {
-					println!("{} Error: failed to send byte - transmit buffer overflow!",systime());
+					println!("{} Error: failed to send byte - transmit buffer overflow!",Local::now().timestamp());
 					return Err(why);
 				},
 				_ => {
-					println!("{} Error: failed to send byte - {}",systime(),why.description());
+					println!("{} Error: failed to send byte - {}",Local::now().timestamp(),why.description());
 					return Err(why);
 				},
 			},
@@ -385,7 +347,7 @@ fn sendraw(listener:&UdpSocket,destaddr:&SocketAddr,payload:&Vec<u8>) -> Result<
 // Automatically encrypts a vector of bytes and sends them over the socket.
 fn sendbytes(listener:&UdpSocket,destaddr:&SocketAddr,bytes:&Vec<u8>,padpath:&Path) -> Result<(),io::Error> {
 	let mut stampedbytes = bytes.clone();
-	stampedbytes.append(&mut int2bytes(&systime()).to_vec());
+	stampedbytes.append(&mut i64_bytes(&Local::now().timestamp()).to_vec());
 	let payload = match encrypt(&stampedbytes,&padpath) {
 		Err(why) => {
 			println!("Could not encrypt bytes - {}",why.description());
@@ -398,7 +360,7 @@ fn sendbytes(listener:&UdpSocket,destaddr:&SocketAddr,bytes:&Vec<u8>,padpath:&Pa
 
 #[derive(Clone)]
 struct Subscription {
-	lastact:u64,
+	lastact:i64,
 	pendingack:bool,
 	deliveryfailures:u64,
 }
@@ -434,7 +396,7 @@ fn main() {
 		process::exit(1);
 	}
 
-	let logfilename:String = format!("{}-teamech-server.log",humantime(systime(),0.0));
+	let logfilename:String = format!("{}-teamech-server.log",Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
 	let logfile:&Path = Path::new(&logfilename);
 	let padpath:&Path = Path::new(&argv[2]);	
 	// Spam detection and auth equipment. 
@@ -443,7 +405,7 @@ fn main() {
 	// Recovery loop: if an unignorable error occurs that requires restarting, we can `break` the inner loops
 	// to wait a set delay before restarting, or `continue` the 'recovery loop to restart immediately.
 	'recovery:loop {
-		match logtofile(&logfile,&format!("Opened log file."),systime()) {
+		match logtofile(&logfile,&format!("Opening of log file"),Local::now()) {
 			Err(why) => {
 				println!("WARNING: Could not open log file at {} - {}. Logs are currently NOT BEING SAVED - you should fix this!",
 																								logfile.display(),why.description());
@@ -456,7 +418,7 @@ fn main() {
 				process::exit(1);
 			},
 			Ok(_) => {
-				log(&logfile,&format!("Successful initialization of pad file."));
+				log(&logfile,&format!("Successful initialization of pad file"));
 			},
 		};
 		let mut inbin:[u8;500]; // recv buffer. payloads longer than 500 bytes will be truncated!
@@ -486,7 +448,7 @@ fn main() {
 		// Processor loop: When the server is running nominally, this never breaks. Error
 		// conditions requiring the system to be reset (e.g. loss of connectivity) can break the
 		// loop, and execution will be caught by the recovery loop and returned to the top.
-		log(&logfile,&format!("Completion of startup sequence."));
+		log(&logfile,&format!("Completion of startup sequence"));
 		let mut inqueue:VecDeque<(SocketAddr,Vec<u8>)> = VecDeque::new();
 		'processor:loop {
 			sleep(Duration::new(0,1_000_000));
@@ -510,7 +472,7 @@ fn main() {
 				},
 			}; // match recvfrom
 			for sub in subscriptions.iter_mut() {
-				if sub.1.pendingack && sub.1.lastact+MAX_PACKET_DELAY*2 < systime() {
+				if sub.1.pendingack && sub.1.lastact+MAX_PACKET_DELAY*2 < Local::now().timestamp() {
 					log(&logfile,&format!("Delivery failure to client at {} [{} failures so far]",sub.0,sub.1.deliveryfailures+1));
 					sub.1.deliveryfailures += 1;
 					sub.1.pendingack = false;
@@ -597,19 +559,19 @@ fn main() {
 					// replay attack.
 					let mut timestamp:[u8;8] = [0;8];
 					timestamp.copy_from_slice(&stampedmessage[stampedmessage.len()-8..stampedmessage.len()]);
-					let inttimestamp:u64 = bytes2int(&timestamp);
-					if inttimestamp > systime()+MAX_PACKET_DELAY {
+					let inttimestamp:i64 = bytes_i64(&timestamp);
+					if inttimestamp > Local::now().timestamp()+MAX_PACKET_DELAY {
 						// Packet timestamp more than the allowed delay into the future? This is a
 						// very weird and unlikely case, probably a clock sync error and not an
 						// attack, but we'll reject it anyway just to be on the safe side.
-						log(&logfile,&format!("Packet rejection to {} due to future timestamp [{} ms]",srcaddr,inttimestamp-systime()));
+						log(&logfile,&format!("Packet rejection to {} due to future timestamp [{} ms]",srcaddr,inttimestamp-Local::now().timestamp()));
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 						continue 'processor;
-					} else if systime() > inttimestamp+MAX_PACKET_DELAY {
+					} else if Local::now().timestamp() > inttimestamp+MAX_PACKET_DELAY {
 						// This is the most likely situation in an actual replay attack - the
 						// timestamp is too far in the past. This means we need to reject the
 						// packet, since it could be used to confuse clients maliciously.
-						log(&logfile,&format!("Packet rejection to {} due to past timestamp [{} ms]",srcaddr,systime()-inttimestamp));
+						log(&logfile,&format!("Packet rejection to {} due to past timestamp [{} ms]",srcaddr,Local::now().timestamp()-inttimestamp));
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 						continue 'processor;
 					}
@@ -626,7 +588,7 @@ fn main() {
 							log(&logfile,&format!("Reset of delivery failure count for {} from {}",srcaddr,sub.deliveryfailures));
 						}
 					}
-					let _ = subscriptions.insert(srcaddr,Subscription{lastact:systime(),pendingack:false,deliveryfailures:0});
+					let _ = subscriptions.insert(srcaddr,Subscription{lastact:Local::now().timestamp(),pendingack:false,deliveryfailures:0});
 					if message.len() == 0 {
 						// If this is an empty message, don't bother relaying it. These types of
 						// messages can be used as subscription requests.
@@ -654,7 +616,7 @@ fn main() {
 							0x06 => {
 								if let Some(sub) = subscriptions.get_mut(&srcaddr) {
 									sub.pendingack = false;
-									sub.lastact = systime();
+									sub.lastact = Local::now().timestamp();
 								} else {
 									let _ = sendbytes(&listener,&srcaddr,&vec![0x19],&padpath); // END OF MEDIUM
 								}
@@ -686,7 +648,7 @@ fn main() {
 								if let Some(sub) = subscriptions.get_mut(&destaddr) {
 									if !sub.pendingack {
 										sub.pendingack = true;
-										sub.lastact = systime();
+										sub.lastact = Local::now().timestamp();
 									}
 								}
 							},
