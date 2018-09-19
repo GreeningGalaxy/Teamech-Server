@@ -1,4 +1,4 @@
-/* Teamech Server v0.3
+/* Teamech Server v0.4
  * August 2018
  * License: AGPL v3.0
  *
