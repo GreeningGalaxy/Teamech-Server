@@ -374,7 +374,7 @@ fn sendbytes(listener:&UdpSocket,destaddr:&SocketAddr,bytes:&Vec<u8>,padpath:&Pa
 #[derive(Clone)]
 struct Subscription {
 	name:String,
-	class:String,
+	classes:Vec<String>,
 	lastact:i64,
 	pendingack:bool,
 	deliveryfailures:u64,
@@ -488,7 +488,7 @@ fn main() {
 			}; // match recvfrom
 			for sub in subscriptions.iter_mut() {
 				if sub.1.pendingack && sub.1.lastact+MAX_PACKET_DELAY*2 < Local::now().timestamp_millis() {
-					log(&logfile,&format!("Delivery failure to {}@{} [{}] [{} failures so far]",&sub.1.name,&sub.1.class,&sub.0,&sub.1.deliveryfailures+1));
+					log(&logfile,&format!("Delivery failure to {}@{} [{}] [{} failures so far]",&sub.1.name,&sub.1.classes[0],&sub.0,&sub.1.deliveryfailures+1));
 					sub.1.deliveryfailures += 1;
 					sub.1.pendingack = false;
 				} 
@@ -496,7 +496,7 @@ fn main() {
 			for sub in subscriptions.clone().iter() {
 				if sub.1.deliveryfailures > MAX_DELIVERY_FAILURES {
 					log(&logfile,&format!("Termination of subscription for {}@{} [{}] for exceeding {} delivery failures",
-																									&sub.1.name,&sub.1.class,&sub.0,&MAX_DELIVERY_FAILURES));
+																								&sub.1.name,&sub.1.classes[0],&sub.0,&MAX_DELIVERY_FAILURES));
 					let _ = subscriptions.remove(&sub.0);
 					let _ = sendbytes(&listener,&sub.0,&vec![0x19],&padpath); // END OF MEDIUM
 				}
@@ -567,10 +567,10 @@ fn main() {
 					};
 					let message:Vec<u8> = stampedmessage[0..stampedmessage.len()-8].to_vec();
 					let mut sendername:String = String::from("unknown");
-					let mut senderclass:String = String::from("unknown");
+					let mut senderclasses:Vec<String> = vec![String::from("unknown")];
 					if let Some(sub) = subscriptions.get(&srcaddr) {
 						sendername = sub.name.clone();
-						senderclass = sub.class.clone();
+						senderclasses = sub.classes.clone();
 					}
 					// Reaching this point means the message decrypted and validated successfully.
 					// However, we still need to verify the timestamp to make sure this isn't a
@@ -583,7 +583,7 @@ fn main() {
 						// very weird and unlikely case, probably a clock sync error and not an
 						// attack, but we'll reject it anyway just to be on the safe side.
 						log(&logfile,&format!("Packet rejection to {}@{} [{}] due to future timestamp [{} ms]",
-													&sendername,&senderclass,&srcaddr,&inttimestamp-&Local::now().timestamp_millis()));
+													&sendername,&senderclasses[0],&srcaddr,&inttimestamp-&Local::now().timestamp_millis()));
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 						continue 'processor;
 					} else if Local::now().timestamp_millis() > inttimestamp+MAX_PACKET_DELAY {
@@ -591,7 +591,7 @@ fn main() {
 						// timestamp is too far in the past. This means we need to reject the
 						// packet, since it could be used to confuse clients maliciously.
 						log(&logfile,&format!("Packet rejection to {}@{} [{}] due to past timestamp [{} ms]",
-													&sendername,&senderclass,&srcaddr,&Local::now().timestamp_millis()-&inttimestamp));
+													&sendername,&senderclasses[0],&srcaddr,&Local::now().timestamp_millis()-&inttimestamp));
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 						continue 'processor;
 					}
@@ -606,7 +606,7 @@ fn main() {
 					if let Some(sub) = subscriptions.get_mut(&srcaddr) {
 						if sub.deliveryfailures > 0 {
 							log(&logfile,&format!("Reset of delivery failure count for {}@{} [{}] from {}",
-													&sendername,&senderclass,&srcaddr,&sub.deliveryfailures));
+													&sendername,&senderclasses[0],&srcaddr,&sub.deliveryfailures));
 						}
 						sub.lastact = Local::now().timestamp_millis();
 						sub.pendingack = false;
@@ -616,7 +616,7 @@ fn main() {
 						let _ = subscriptions.insert(srcaddr,
 							Subscription{
 								name:String::new(),
-								class:String::new(),
+								classes:vec![String::new()],
 								lastact:Local::now().timestamp_millis(),
 								pendingack:false,
 								deliveryfailures:0	
@@ -653,13 +653,14 @@ fn main() {
 									log(&logfile,&format!("Client name declaration of '{}' from unregistered client at {}",&newname,&srcaddr));
 									let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 								}
-							}
+							},
 							0x11 => { // DEVICE CONTROL ONE
-								// Client is telling us its nonunique device class. 
+								// Client is telling us a nonunique device class by which it can be
+								// addressed.
 								let newclass:String = String::from_utf8_lossy(&message[1..message.len()].to_vec()).to_string();
 								if let Some(sub) = subscriptions.get_mut(&srcaddr) {
 									if newclass.len() > 128 {
-										log(&logfile,&format!("Client class declaration of '{}' from client at {} - invalid (too long)",&newclass,&srcaddr));
+										log(&logfile,&format!("Clientclass declaration of '{}' from client at {} - invalid (too long)",&newclass,&srcaddr));
 										let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 									} else if newclass.contains(" ") {
 										log(&logfile,&format!("Client class declaration of '{}' from client at {} - invalid (contains spaces)",
@@ -667,33 +668,49 @@ fn main() {
 										let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 									} else {
 										log(&logfile,&format!("Client class declaration of '{}' from client at {}",&newclass,&srcaddr));
-										sub.class = newclass;
+										if sub.classes == vec![String::new()] {
+											sub.classes = Vec::new();
+										}
+										if !sub.classes.contains(&newclass) {
+											sub.classes.push(newclass);
+										}
 										let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&padpath); // ACK
 									}
-								} else {
-									log(&logfile,&format!("Client class declaration of '{}' from unregistered client at {}",&newclass,&srcaddr));
-									let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 								}
-							}
+							},
+							0x12 => { // DEVICE CONTROL TWO
+								// Client is revoking a class that was previously set.
+								let delclass:String = String::from_utf8_lossy(&message[1..message.len()].to_vec()).to_string();
+								if let Some(sub) = subscriptions.get_mut(&srcaddr) {
+									for n in (0..sub.classes.len()).rev() {
+										if sub.classes[n] == delclass {
+											sub.classes.remove(n);
+										}
+									}
+									let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&padpath); // ACK
+								} 
+							},
 							0x05 => { // ENQUIRY
 								// Client is asking us who else is on the server.
-								log(&logfile,&format!("Request for subscription list by {}@{} [{}]",&sendername,&senderclass,&srcaddr));
+								log(&logfile,&format!("Request for subscription list by {}@{} [{}]",&sendername,&senderclasses[0],&srcaddr));
 								for sub in subscriptions.values() {
-									let mut subline:Vec<u8> = Vec::new();
-									subline.push(0x05);
-									subline.append(&mut sub.name.as_bytes().to_vec());
-									subline.push(0x09);
-									subline.append(&mut sub.class.as_bytes().to_vec());
-									let _ = sendbytes(&listener,&srcaddr,&subline,&padpath);
+									for class in &sub.classes {
+										let mut subline:Vec<u8> = Vec::new();
+										subline.push(0x05);
+										subline.append(&mut sub.name.as_bytes().to_vec());
+										subline.push(0x09);
+										subline.append(&mut class.as_bytes().to_vec());
+										let _ = sendbytes(&listener,&srcaddr,&subline,&padpath);
+									}
 								}
-								log(&logfile,&format!("Complete transmission of subscription list to {}@{} [{}]",&sendername,&senderclass,&srcaddr));
-							}
+								log(&logfile,&format!("Complete transmission of subscription list to {}@{} [{}]",&sendername,&senderclasses[0],&srcaddr));
+							},
 							0x18 => { // CANCEL
 								// Subscription cancellation: The sender has notified us that they
 								// are no longer listening and we should stop sending them stuff.
 								// Whenever a subscription is cancelled for any reason, we send END
 								// OF MEDIUM; the client can react to this however they like. 
-								log(&logfile,&format!("Cancellation of subscription by {}@{} [{}]",&sendername,&senderclass,&srcaddr));
+								log(&logfile,&format!("Cancellation of subscription by {}@{} [{}]",&sendername,&senderclasses[0],&srcaddr));
 								let _ = subscriptions.remove(&srcaddr);
 								let _ = sendbytes(&listener,&srcaddr,&vec![0x19],&padpath); // END OF MEDIUM
 							},
@@ -708,14 +725,14 @@ fn main() {
 							other => {
 								// Unimplemented control code? NAK response for now.
 								log(&logfile,&format!("Unknown control packet {} from {}@{} [{}]",
-																			&bytes2hex(&vec![other]),&sendername,&senderclass,&srcaddr));
+																			&bytes2hex(&vec![other]),&sendername,&senderclasses[0],&srcaddr));
 								let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 							},
 						}; // match recvdata[0]
 						continue 'processor;
 					}
 					let stringmessage:String = String::from_utf8_lossy(&message).to_string();
-					log(&logfile,&format!("{}@{} [{}] -> {} [0x {}]",&sendername,&senderclass,&srcaddr,&stringmessage,bytes2hex(&message)));
+					log(&logfile,&format!("{}@{} [{}] -> {} [0x {}]",&sendername,&senderclasses[0],&srcaddr,&stringmessage,bytes2hex(&message)));
 					let mut destname:&str = "";
 					if message[0] == b'#' || message[0] == b'@' {
 						destname = stringmessage.splitn(1," ").collect::<Vec<&str>>()[0];
@@ -728,9 +745,9 @@ fn main() {
 					'itersend:for sub in othersubs.iter() {
 						// send the message to clients with the specified name or class, or send to
 						// everyone if no name or class was specified.
-						if (destname.starts_with('#') && &sub.1.class == destname.trim_matches('#')) ||
-							(destname.starts_with('@') && &sub.1.name == destname.trim_matches('@')) || 
-							(destname == "") || (&sub.1.class == "console") {
+						if (destname.starts_with('#') && sub.1.classes.contains(&destname.trim_matches('#').to_owned())) ||
+							(destname.starts_with('@') && sub.1.name == destname.trim_matches('@')) || 
+							(destname == "") || (sub.1.classes.contains(&"supervisor".to_owned())) {
 							match sendraw(&listener,&sub.0,&recvdata) {
 								Err(why) => {
 									log(&logfile,&format!("Local failure to transmit packet to {}: {}",&sub.0,&why.description()));
