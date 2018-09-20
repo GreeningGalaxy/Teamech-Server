@@ -488,15 +488,15 @@ fn main() {
 			}; // match recvfrom
 			for sub in subscriptions.iter_mut() {
 				if sub.1.pendingack && sub.1.lastact+MAX_PACKET_DELAY*2 < Local::now().timestamp_millis() {
-					log(&logfile,&format!("Delivery failure to client at {} [{} failures so far]",&sub.0,&sub.1.deliveryfailures+1));
+					log(&logfile,&format!("Delivery failure to {}@{} [{}] [{} failures so far]",&sub.1.name,&sub.1.class,&sub.0,&sub.1.deliveryfailures+1));
 					sub.1.deliveryfailures += 1;
 					sub.1.pendingack = false;
 				} 
 			}
 			for sub in subscriptions.clone().iter() {
 				if sub.1.deliveryfailures > MAX_DELIVERY_FAILURES {
-					log(&logfile,&format!("Termination of subscription for client at {} for exceeding {} delivery failures",
-																												&sub.0,&MAX_DELIVERY_FAILURES));
+					log(&logfile,&format!("Termination of subscription for {}@{} [{}] for exceeding {} delivery failures",
+																									&sub.1.name,&sub.1.class,&sub.0,&MAX_DELIVERY_FAILURES));
 					let _ = subscriptions.remove(&sub.0);
 					let _ = sendbytes(&listener,&sub.0,&vec![0x19],&padpath); // END OF MEDIUM
 				}
@@ -582,7 +582,7 @@ fn main() {
 						// Packet timestamp more than the allowed delay into the future? This is a
 						// very weird and unlikely case, probably a clock sync error and not an
 						// attack, but we'll reject it anyway just to be on the safe side.
-						log(&logfile,&format!("Packet rejection to @{}-#{} [{}] due to future timestamp [{} ms]",
+						log(&logfile,&format!("Packet rejection to {}@{} [{}] due to future timestamp [{} ms]",
 													&sendername,&senderclass,&srcaddr,&inttimestamp-&Local::now().timestamp_millis()));
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 						continue 'processor;
@@ -590,7 +590,7 @@ fn main() {
 						// This is the most likely situation in an actual replay attack - the
 						// timestamp is too far in the past. This means we need to reject the
 						// packet, since it could be used to confuse clients maliciously.
-						log(&logfile,&format!("Packet rejection to @{}-#{} [{}] due to past timestamp [{} ms]",
+						log(&logfile,&format!("Packet rejection to {}@{} [{}] due to past timestamp [{} ms]",
 													&sendername,&senderclass,&srcaddr,&Local::now().timestamp_millis()-&inttimestamp));
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 						continue 'processor;
@@ -605,7 +605,7 @@ fn main() {
 					// status to keep it current.
 					if let Some(sub) = subscriptions.get_mut(&srcaddr) {
 						if sub.deliveryfailures > 0 {
-							log(&logfile,&format!("Reset of delivery failure count for @{}-#{} [{}] from {}",
+							log(&logfile,&format!("Reset of delivery failure count for {}@{} [{}] from {}",
 													&sendername,&senderclass,&srcaddr,&sub.deliveryfailures));
 						}
 						sub.lastact = Local::now().timestamp_millis();
@@ -626,17 +626,17 @@ fn main() {
 					if message.len() == 0 {
 						// If this is an empty message, don't bother relaying it. These types of
 						// messages can be used as subscription requests.
-						let _ = sendbytes(&listener,&srcaddr,&vec![0x02],&padpath); // START OF TEXT
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&padpath); // START OF TEXT
 						continue 'processor;
 					}
 					// Payloads containing a message which is a single byte and one of the ASCII 
 					// non-printing control characters are reserved for client-server functions. 
-					if (message.len() == 1 && message[0] <= 0x1F) || (message.len() >= 2 && (message[0] == 0x01 || message[0] == 0x02)) {
+					if (message.len() == 1 && message[0] <= 0x1F) || (message.len() >= 2 && (message[0] == 0x01 || message[0] == 0x11)) {
 						match message[0] {
 							0x01 => { // START OF HEADING
 								// Client is telling us its semiunique name.
+								let newname:String = String::from_utf8_lossy(&message[1..message.len()].to_vec()).to_string();
 								if let Some(sub) = subscriptions.get_mut(&srcaddr) {
-									let newname:String = String::from_utf8_lossy(&message[1..message.len()].to_vec()).to_string();
 									if newname.len() > 128 {
 										log(&logfile,&format!("Client name declaration of '{}' from client at {} - invalid (too long)",&newname,&srcaddr));
 										let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
@@ -648,13 +648,16 @@ fn main() {
 										log(&logfile,&format!("Client name declaration of '{}' from client at {}",&newname,&srcaddr));
 										sub.name = newname;
 										let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&padpath); // ACK
-									}
+									} 
+								} else {
+									log(&logfile,&format!("Client name declaration of '{}' from unregistered client at {}",&newname,&srcaddr));
+									let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 								}
 							}
 							0x11 => { // DEVICE CONTROL ONE
 								// Client is telling us its nonunique device class. 
+								let newclass:String = String::from_utf8_lossy(&message[1..message.len()].to_vec()).to_string();
 								if let Some(sub) = subscriptions.get_mut(&srcaddr) {
-									let newclass:String = String::from_utf8_lossy(&message[1..message.len()].to_vec()).to_string();
 									if newclass.len() > 128 {
 										log(&logfile,&format!("Client class declaration of '{}' from client at {} - invalid (too long)",&newclass,&srcaddr));
 										let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
@@ -667,11 +670,14 @@ fn main() {
 										sub.class = newclass;
 										let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&padpath); // ACK
 									}
+								} else {
+									log(&logfile,&format!("Client class declaration of '{}' from unregistered client at {}",&newclass,&srcaddr));
+									let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 								}
 							}
 							0x05 => { // ENQUIRY
 								// Client is asking us who else is on the server.
-								log(&logfile,&format!("Request for subscription list by @{}-#{} [{}]",&sendername,&senderclass,&srcaddr));
+								log(&logfile,&format!("Request for subscription list by {}@{} [{}]",&sendername,&senderclass,&srcaddr));
 								for sub in subscriptions.values() {
 									let mut subline:Vec<u8> = Vec::new();
 									subline.push(0x05);
@@ -680,14 +686,14 @@ fn main() {
 									subline.append(&mut sub.class.as_bytes().to_vec());
 									let _ = sendbytes(&listener,&srcaddr,&subline,&padpath);
 								}
-								log(&logfile,&format!("Complete transmission of subscription list to @{}-#{} [{}]",&sendername,&senderclass,&srcaddr));
+								log(&logfile,&format!("Complete transmission of subscription list to {}@{} [{}]",&sendername,&senderclass,&srcaddr));
 							}
 							0x18 => { // CANCEL
 								// Subscription cancellation: The sender has notified us that they
 								// are no longer listening and we should stop sending them stuff.
 								// Whenever a subscription is cancelled for any reason, we send END
 								// OF MEDIUM; the client can react to this however they like. 
-								log(&logfile,&format!("Cancellation of subscription by @{}-#{} [{}]",&sendername,&senderclass,&srcaddr));
+								log(&logfile,&format!("Cancellation of subscription by {}@{} [{}]",&sendername,&senderclass,&srcaddr));
 								let _ = subscriptions.remove(&srcaddr);
 								let _ = sendbytes(&listener,&srcaddr,&vec![0x19],&padpath); // END OF MEDIUM
 							},
@@ -701,7 +707,7 @@ fn main() {
 							},
 							other => {
 								// Unimplemented control code? NAK response for now.
-								log(&logfile,&format!("Unknown control packet {} from @{}-#{} [{}]",
+								log(&logfile,&format!("Unknown control packet {} from {}@{} [{}]",
 																			&bytes2hex(&vec![other]),&sendername,&senderclass,&srcaddr));
 								let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 							},
@@ -709,7 +715,7 @@ fn main() {
 						continue 'processor;
 					}
 					let stringmessage:String = String::from_utf8_lossy(&message).to_string();
-					log(&logfile,&format!("@{}-#{} [{}] -> {} [0x {}]",&sendername,&senderclass,&srcaddr,&stringmessage,bytes2hex(&message)));
+					log(&logfile,&format!("{}@{} [{}] -> {} [0x {}]",&sendername,&senderclass,&srcaddr,&stringmessage,bytes2hex(&message)));
 					let mut destname:&str = "";
 					if message[0] == b'#' || message[0] == b'@' {
 						destname = stringmessage.splitn(1," ").collect::<Vec<&str>>()[0];
