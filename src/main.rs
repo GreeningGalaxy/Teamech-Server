@@ -1,9 +1,9 @@
-/* Teamech Server v0.4
+/* Teamech Server v0.5
  * August 2018
  * License: AGPL v3.0
  *
  * This source code is provided with ABSOLUTELY NO WARRANTY. You are fully responsible for any
- * operations that your computers carry out as a result of running this code or anything derived
+* operations that your computers carry out as a result of running this code or anything derived
  * from it. The developer assumes the full absolution of liability described in the AGPL v3.0
  * license.
  *
@@ -54,7 +54,7 @@
 Cargo.toml:
 [package]
 name = "teamech-server"
-version = "0.4.0"
+version = "0.5.0"
 authors = ["ellie"]
 
 [dependencies]
@@ -137,16 +137,16 @@ fn bytes_u64(bytes:&[u8;8]) -> u64 {
 }
 
 // bytes2hex converts a vector of bytes into a hexadecimal string. This is used mainly for
-// // debugging, when printing a binary string.
+// debugging, when printing a binary string.
 fn bytes2hex(v:&Vec<u8>) -> String {
 	let mut result:String = String::from("");
 	for x in 0..v.len() {
 		if v[x] == 0x00 {
 			result.push_str(&format!("00"));
 		} else if v[x] < 0x10 {
-			result.push_str(&format!("0{:x?}",v[x]));
+			result.push_str(&format!("0{:x?}",&v[x]));
 		} else {
-			result.push_str(&format!("{:x?}",v[x]));
+			result.push_str(&format!("{:x?}",&v[x]));
 		}
 		if x < v.len()-1 {
 			result.push_str(" ");
@@ -373,6 +373,8 @@ fn sendbytes(listener:&UdpSocket,destaddr:&SocketAddr,bytes:&Vec<u8>,padpath:&Pa
 
 #[derive(Clone)]
 struct Subscription {
+	name:String,
+	class:String,
 	lastact:i64,
 	pendingack:bool,
 	deliveryfailures:u64,
@@ -394,7 +396,7 @@ fn main() {
 		} else {
 			// If the user asked for port 0, tell them all about why that won't go and what we're doing
 			// instead of passing 0 to the OS.
-			print!("Warning: Port 0 (OS auto-select) has been provided. Autoselection of port numbers is not supported for the server ");
+			print!("Port 0 (OS auto-select) has been provided. Autoselection of port numbers is not supported for the server ");
 			print!("by the Teamech protocol, so port 6666 (the Teamech default) has been selected. If you try to run two instances of ");
 			print!("Teamech with port 0 specified for both, it will NOT work - if you want to run more than one Teamech server at a ");
 			print!("time, you *need* to specify the ports for each manually.");
@@ -409,7 +411,7 @@ fn main() {
 		process::exit(1);
 	}
 
-	let logfilename:String = format!("{}-teamech-server.log",Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+	let logfilename:String = format!("{}-teamech-server.log",&Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
 	let logfile:&Path = Path::new(&logfilename);
 	let padpath:&Path = Path::new(&argv[2]);	
 	// Spam detection and auth equipment. 
@@ -421,13 +423,13 @@ fn main() {
 		match logtofile(&logfile,&format!("Opening of log file"),Local::now()) {
 			Err(why) => {
 				println!("WARNING: Could not open log file at {} - {}. Logs are currently NOT BEING SAVED - you should fix this!",
-																								logfile.display(),why.description());
+																								&logfile.display(),&why.description());
 			},
 			Ok(_) => (),
 		};
 		match fs::File::open(&padpath) {
 			Err(why) => {
-				log(&logfile,&format!("Crash due to local failure to open pad file at {}: {}",padpath.display(),why.description()));
+				log(&logfile,&format!("Crash due to local failure to open pad file at {}: {}",&padpath.display(),&why.description()));
 				process::exit(1);
 			},
 			Ok(_) => {
@@ -436,17 +438,17 @@ fn main() {
 		};
 		let mut inbin:[u8;500]; // recv buffer. payloads longer than 500 bytes will be truncated!
 		let mut subscriptions:HashMap<SocketAddr,Subscription> = HashMap::new(); // directory of subscribed addresses and delivery failures
-		let listener:UdpSocket = match UdpSocket::bind(&format!("0.0.0.0:{}",portn)) {
+		let listener:UdpSocket = match UdpSocket::bind(&format!("0.0.0.0:{}",&portn)) {
 			Ok(socket) => socket,
 			Err(why) => {
 				// Fatal error condition #1: We can't bind to the local address on the given UDP
 				// port. Something's probably blocking it, which the user will need to clear before
 				// this program can run.
-				log(&logfile,&format!("Crash due to local failure to bind to local address: {}",why.description()));
+				log(&logfile,&format!("Crash due to local failure to bind to local address: {}",&why.description()));
 				process::exit(1);
 			},
 		};
-		log(&logfile,&format!("Successful opening of socket on port {}",portn));
+		log(&logfile,&format!("Successful opening of socket on port {}",&portn));
 		match listener.set_nonblocking(true) {
 			Ok(_) => (),
 			Err(why) => {
@@ -454,7 +456,7 @@ fn main() {
 				// meaning the program won't really work. It's unclear to me what would cause this,
 				// but it would probably be a platform compatibility-related error, and not
 				// something we can fix here.
-				log(&logfile,&format!("Crash due to local failure to get non-blocking read access from the socket: {}",why.description()));
+				log(&logfile,&format!("Crash due to local failure to get non-blocking read access from the socket: {}",&why.description()));
 				process::exit(1);
 			},
 		};
@@ -479,14 +481,14 @@ fn main() {
 						// binding, or the network is borked? I dunno, but since this server is
 						// supposed to run unsupervised, we'll just let the recovery loop catch us
 						// and try to start again, rather than exiting. 
-						log(&logfile,&format!("Local read error on socket: {}",why.description()));
+						log(&logfile,&format!("Local read error on socket: {}",&why.description()));
 						break 'processor;
 					},
 				},
 			}; // match recvfrom
 			for sub in subscriptions.iter_mut() {
 				if sub.1.pendingack && sub.1.lastact+MAX_PACKET_DELAY*2 < Local::now().timestamp_millis() {
-					log(&logfile,&format!("Delivery failure to client at {} [{} failures so far]",sub.0,sub.1.deliveryfailures+1));
+					log(&logfile,&format!("Delivery failure to client at {} [{} failures so far]",&sub.0,&sub.1.deliveryfailures+1));
 					sub.1.deliveryfailures += 1;
 					sub.1.pendingack = false;
 				} 
@@ -494,7 +496,7 @@ fn main() {
 			for sub in subscriptions.clone().iter() {
 				if sub.1.deliveryfailures > MAX_DELIVERY_FAILURES {
 					log(&logfile,&format!("Termination of subscription for client at {} for exceeding {} delivery failures",
-																												sub.0,MAX_DELIVERY_FAILURES));
+																												&sub.0,&MAX_DELIVERY_FAILURES));
 					let _ = subscriptions.remove(&sub.0);
 					let _ = sendbytes(&listener,&sub.0,&vec![0x19],&padpath); // END OF MEDIUM
 				}
@@ -542,7 +544,7 @@ fn main() {
 							io::ErrorKind::InvalidData => {
 								// Message decryption was attempted, but did not produce a valid
 								// signed message. This is grounds for summary deauthentication.
-								log(&logfile,&format!("Invalid packet from client at {}, subscription terminated",srcaddr));
+								log(&logfile,&format!("Invalid packet from client at {}, subscription terminated",&srcaddr));
 								let _ = sendbytes(&listener,&srcaddr,&vec![0x19],&padpath); // END OF MEDIUM
 								let _ = subscriptions.remove(&srcaddr);
 								if let Some(points) = banpoints.get_mut(&srcaddr.ip()) {
@@ -556,7 +558,7 @@ fn main() {
 								// bannable or deauthenticable offense; instead, we simply notify
 								// the sender that the server is having trouble.
 								log(&logfile,&format!("Local decryption failure of packet received from {}: {}",
-																									srcaddr,why.description()));
+																									&srcaddr,&why.description()));
 								let _ = sendbytes(&listener,&srcaddr,&vec![0x1A],&padpath); // SUBSTITUTE (server-side error)
 								continue 'processor;
 							},
@@ -564,8 +566,11 @@ fn main() {
 						Ok(bytes) => bytes,
 					};
 					let message:Vec<u8> = stampedmessage[0..stampedmessage.len()-8].to_vec();
-					if message.len() > 1 {
-						log(&logfile,&format!("{} -> {} [{}]",srcaddr,String::from_utf8_lossy(&message),bytes2hex(&message)));
+					let mut sendername:String = String::from("unknown");
+					let mut senderclass:String = String::from("unknown");
+					if let Some(sub) = subscriptions.get(&srcaddr) {
+						sendername = sub.name.clone();
+						senderclass = sub.class.clone();
 					}
 					// Reaching this point means the message decrypted and validated successfully.
 					// However, we still need to verify the timestamp to make sure this isn't a
@@ -577,14 +582,16 @@ fn main() {
 						// Packet timestamp more than the allowed delay into the future? This is a
 						// very weird and unlikely case, probably a clock sync error and not an
 						// attack, but we'll reject it anyway just to be on the safe side.
-						log(&logfile,&format!("Packet rejection to {} due to future timestamp [{} ms]",srcaddr,inttimestamp-Local::now().timestamp_millis()));
+						log(&logfile,&format!("Packet rejection to @{}-#{} [{}] due to future timestamp [{} ms]",
+													&sendername,&senderclass,&srcaddr,&inttimestamp-&Local::now().timestamp_millis()));
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 						continue 'processor;
 					} else if Local::now().timestamp_millis() > inttimestamp+MAX_PACKET_DELAY {
 						// This is the most likely situation in an actual replay attack - the
 						// timestamp is too far in the past. This means we need to reject the
 						// packet, since it could be used to confuse clients maliciously.
-						log(&logfile,&format!("Packet rejection to {} due to past timestamp [{} ms]",srcaddr,Local::now().timestamp_millis()-inttimestamp));
+						log(&logfile,&format!("Packet rejection to @{}-#{} [{}] due to past timestamp [{} ms]",
+													&sendername,&senderclass,&srcaddr,&Local::now().timestamp_millis()-&inttimestamp));
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 						continue 'processor;
 					}
@@ -592,16 +599,30 @@ fn main() {
 					if !subscriptions.contains_key(&srcaddr) {
 						// Let the sender know that they were subscribed if they weren't already
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x02],&padpath); // START OF TEXT
-						log(&logfile,&format!("Establishment of subscription by {}",srcaddr));
+						log(&logfile,&format!("Establishment of subscription for client at {}",&srcaddr));
 					}
 					// Insert the new subscription, or reset the sender's existing subscription 
 					// status to keep it current.
 					if let Some(sub) = subscriptions.get_mut(&srcaddr) {
 						if sub.deliveryfailures > 0 {
-							log(&logfile,&format!("Reset of delivery failure count for {} from {}",srcaddr,sub.deliveryfailures));
+							log(&logfile,&format!("Reset of delivery failure count for @{}-#{} [{}] from {}",
+													&sendername,&senderclass,&srcaddr,&sub.deliveryfailures));
 						}
+						sub.lastact = Local::now().timestamp_millis();
+						sub.pendingack = false;
+						sub.deliveryfailures = 0;
 					}
-					let _ = subscriptions.insert(srcaddr,Subscription{lastact:Local::now().timestamp_millis(),pendingack:false,deliveryfailures:0});
+					if ! subscriptions.contains_key(&srcaddr) {
+						let _ = subscriptions.insert(srcaddr,
+							Subscription{
+								name:String::new(),
+								class:String::new(),
+								lastact:Local::now().timestamp_millis(),
+								pendingack:false,
+								deliveryfailures:0	
+							}
+						);
+					}
 					if message.len() == 0 {
 						// If this is an empty message, don't bother relaying it. These types of
 						// messages can be used as subscription requests.
@@ -610,19 +631,63 @@ fn main() {
 					}
 					// Payloads containing a message which is a single byte and one of the ASCII 
 					// non-printing control characters are reserved for client-server functions. 
-					// (Messages intended for clients with these characters should be longer than 
-					// one byte.)  
-					if message.len() == 1 && message[0] <= 0x1F {
+					if (message.len() == 1 && message[0] <= 0x1F) || (message.len() >= 2 && (message[0] == 0x01 || message[0] == 0x02)) {
 						match message[0] {
+							0x01 => { // START OF HEADING
+								// Client is telling us its semiunique name.
+								if let Some(sub) = subscriptions.get_mut(&srcaddr) {
+									let newname:String = String::from_utf8_lossy(&message[1..message.len()].to_vec()).to_string();
+									if newname.len() > 128 {
+										log(&logfile,&format!("Client name declaration of '{}' from client at {} - invalid (too long)",&newname,&srcaddr));
+										let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
+									} else if newname.contains(" ") {
+										log(&logfile,&format!("Client name declaration of '{}' from client at {} - invalid (contains spaces)",
+																														&newname,&srcaddr));
+										let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
+									} else {
+										log(&logfile,&format!("Client name declaration of '{}' from client at {}",&newname,&srcaddr));
+										sub.name = newname;
+										let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&padpath); // ACK
+									}
+								}
+							}
+							0x11 => { // DEVICE CONTROL ONE
+								// Client is telling us its nonunique device class. 
+								if let Some(sub) = subscriptions.get_mut(&srcaddr) {
+									let newclass:String = String::from_utf8_lossy(&message[1..message.len()].to_vec()).to_string();
+									if newclass.len() > 128 {
+										log(&logfile,&format!("Client class declaration of '{}' from client at {} - invalid (too long)",&newclass,&srcaddr));
+										let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
+									} else if newclass.contains(" ") {
+										log(&logfile,&format!("Client class declaration of '{}' from client at {} - invalid (contains spaces)",
+																														&newclass,&srcaddr));
+										let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
+									} else {
+										log(&logfile,&format!("Client class declaration of '{}' from client at {}",&newclass,&srcaddr));
+										sub.class = newclass;
+										let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&padpath); // ACK
+									}
+								}
+							}
+							0x05 => { // ENQUIRY
+								// Client is asking us who else is on the server.
+								log(&logfile,&format!("Request for subscription list by @{}-#{} [{}]",&sendername,&senderclass,&srcaddr));
+								for sub in subscriptions.values() {
+									let mut subline:Vec<u8> = Vec::new();
+									subline.push(0x05);
+									subline.append(&mut sub.name.as_bytes().to_vec());
+									subline.push(0x09);
+									subline.append(&mut sub.class.as_bytes().to_vec());
+									let _ = sendbytes(&listener,&srcaddr,&subline,&padpath);
+								}
+								log(&logfile,&format!("Complete transmission of subscription list to @{}-#{} [{}]",&sendername,&senderclass,&srcaddr));
+							}
 							0x18 => { // CANCEL
 								// Subscription cancellation: The sender has notified us that they
-								// are no longer listening and we should stop sending them
-								// messages. This is technically an optional courtesy, since
-								// eventually we'll just time them out, but it helps keep the
-								// server load down if clients use this properly.
+								// are no longer listening and we should stop sending them stuff.
 								// Whenever a subscription is cancelled for any reason, we send END
 								// OF MEDIUM; the client can react to this however they like. 
-								log(&logfile,&format!("Cancellation of subscription from {}",srcaddr));
+								log(&logfile,&format!("Cancellation of subscription by @{}-#{} [{}]",&sendername,&senderclass,&srcaddr));
 								let _ = subscriptions.remove(&srcaddr);
 								let _ = sendbytes(&listener,&srcaddr,&vec![0x19],&padpath); // END OF MEDIUM
 							},
@@ -636,41 +701,52 @@ fn main() {
 							},
 							other => {
 								// Unimplemented control code? NAK response for now.
-								log(&logfile,&format!("Unknown control packet {} from {}",bytes2hex(&vec![other]),srcaddr));
+								log(&logfile,&format!("Unknown control packet {} from @{}-#{} [{}]",
+																			&bytes2hex(&vec![other]),&sendername,&senderclass,&srcaddr));
 								let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
 							},
 						}; // match recvdata[0]
 						continue 'processor;
 					}
+					let stringmessage:String = String::from_utf8_lossy(&message).to_string();
+					log(&logfile,&format!("@{}-#{} [{}] -> {} [0x {}]",&sendername,&senderclass,&srcaddr,&stringmessage,bytes2hex(&message)));
+					let mut destname:&str = "";
+					if message[0] == b'#' || message[0] == b'@' {
+						destname = stringmessage.splitn(1," ").collect::<Vec<&str>>()[0];
+					}
 					// Produce a table of subscribers other than the sender, to which to send the
 					// message.
 					let mut othersubs:HashMap<SocketAddr,Subscription> = subscriptions.clone();
 					let _ = othersubs.remove(&srcaddr);
-					if othersubs.len() == 0 {
-						// If there is no one else on the server, let the client know by
-						// responding with 0x03 END OF TEXT instead of 0x06 ACK.
-						let _ = sendbytes(&listener,&srcaddr,&vec![0x03],&padpath); // END OF TEXT
-						continue 'processor;
-					}
-					'itersend:for destaddr in othersubs.keys() {
-						match sendraw(&listener,&destaddr,&recvdata) {
-							Err(why) => {
-								log(&logfile,&format!("Local failure to transmit packet to {}: {}",destaddr,why.description()));
-							},
-							Ok(_) => {
-								if let Some(sub) = subscriptions.get_mut(&destaddr) {
-									if !sub.pendingack {
-										sub.pendingack = true;
-										sub.lastact = Local::now().timestamp_millis();
+					let mut retransmissions:u64 = 0;
+					'itersend:for sub in othersubs.iter() {
+						// send the message to clients with the specified name or class, or send to
+						// everyone if no name or class was specified.
+						if (destname.starts_with('#') && &sub.1.class == destname.trim_matches('#')) ||
+							(destname.starts_with('@') && &sub.1.name == destname.trim_matches('@')) || 
+							(destname == "") || (&sub.1.class == "console") {
+							match sendraw(&listener,&sub.0,&recvdata) {
+								Err(why) => {
+									log(&logfile,&format!("Local failure to transmit packet to {}: {}",&sub.0,&why.description()));
+								},
+								Ok(_) => {
+									if let Some(sub) = subscriptions.get_mut(&sub.0) {
+										if !sub.pendingack {
+											sub.pendingack = true;
+											sub.lastact = Local::now().timestamp_millis();
+										}
 									}
-								}
-							},
-						};
+									retransmissions += 1;
+								},
+							};
+						}
 					} // 'itersend
-					log(&logfile,&format!("Acknowledgement of retransmission by {} clients",subscriptions.len()-1));
-					if subscriptions.len() > 1 {
+					log(&logfile,&format!("Retransmission to {} clients",&retransmissions));
+					if retransmissions > 0 {
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&padpath); // ACK
 					} else {
+						// If there is no one else on the server, let the client know by
+						// responding with 0x03 END OF TEXT instead of 0x06 ACK.
 						let _ = sendbytes(&listener,&srcaddr,&vec![0x03],&padpath); // END OF TEXT
 					}
 				}, // pop Some
