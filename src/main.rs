@@ -1,4 +1,4 @@
-/* Teamech Server v0.5
+/* Teamech Server v0.6
  * August 2018
  * License: AGPL v3.0
  *
@@ -20,14 +20,14 @@
  * clients attached to the hardware being managed, using a server such as this one to relay
  * messages.
  * This file contains the source code for the Teamech server, which expects to communicate with
- * Teamech clients. The distribution in which you received this file should also contain the source
- * code for the desktop client.
+ * Teamech clients. 
  *
  *
  * Server Status Response Codes:
  * 
  * 0x02 START OF TEXT 
  *	  Subscription entered. Message received decrypted and verified successfully.
+ *	  Client should now send identification.
  *
  * 0x03 END OF TEXT
  *	  Sent to a client instead of ACK when that client is the only subscriber on the server when
@@ -54,7 +54,7 @@
 Cargo.toml:
 [package]
 name = "teamech-server"
-version = "0.5.0"
+version = "0.6"
 authors = ["ellie"]
 
 [dependencies]
@@ -67,14 +67,19 @@ byteorder = "1"
 		
 extern crate tiny_keccak;
 use tiny_keccak::Keccak;
+
 extern crate rand;
+
 extern crate dirs;
 use dirs::home_dir;
+
 extern crate chrono;
 use chrono::prelude::*;
-use std::time::Duration;
+
 extern crate byteorder;
 use byteorder::{LittleEndian,ReadBytesExt,WriteBytesExt};
+
+use std::time::Duration;
 use std::env::args;
 use std::process;
 use std::thread::sleep;
@@ -84,6 +89,7 @@ use std::io::prelude::*;
 use std::net::{UdpSocket,SocketAddr,IpAddr};
 use std::collections::{HashMap,HashSet,VecDeque};
 use std::fs;
+use std::fs::File;
 use std::path::{Path,PathBuf};
 
 // Default Parameters
@@ -155,6 +161,75 @@ fn bytes2hex(v:&Vec<u8>) -> String {
 	return result;
 }
 
+// Takes a boolean expression and an input string, and returns whether the expression matches the
+// input. 
+// Example:
+// input - @foo #foo #bar #baz
+// pattern - @foo & !#bar
+// result: false
+// pattern - #bar | #bop
+// result: true
+fn wordmatch(pattern:&str,input:&str) -> bool {
+	if pattern == "" || input.contains(&pattern) {
+		// handle trivial cases, like empty patterns and patterns which match exactly one target,
+		// prior to all others, ensuring that messages sent to all clients or single specified
+		// names/classes are routed as fast as possible.
+		return true;
+	}
+	let paddedinput:&str = &format!(" {} ",input);
+	let ops:Vec<&str> = vec!["!","&","|","^","(",")"];
+	let mut fixedpattern:String = String::from(pattern);
+	for c in ops.iter() {
+		fixedpattern = fixedpattern.replace(c,&format!(" {} ",c));
+	}
+	for element in fixedpattern.clone().split_whitespace() {
+		let paddedelement:&str = &format!(" {} ",element);
+		if !ops.contains(&element) {
+			if paddedinput.contains(&paddedelement) {
+				fixedpattern = fixedpattern.replace(&element,"1");
+			} else {
+				fixedpattern = fixedpattern.replace(&element,"0");
+			}
+		}
+	}
+	fixedpattern = fixedpattern.replace(" ","");
+	loop {
+		let mut subpattern:String = fixedpattern.clone();
+		// NOT
+		subpattern = subpattern.replace("!0","1");
+		subpattern = subpattern.replace("!1","0");
+		// OR
+		subpattern = subpattern.replace("0|1","1");
+		subpattern = subpattern.replace("1|0","1");
+		subpattern = subpattern.replace("1|1","1");
+		subpattern = subpattern.replace("0|0","0");
+		// AND
+		subpattern = subpattern.replace("0&1","0");
+		subpattern = subpattern.replace("1&0","0");
+		subpattern = subpattern.replace("1&1","1");
+		subpattern = subpattern.replace("0&0","0");
+		// XOR
+		subpattern = subpattern.replace("0^1","1");
+		subpattern = subpattern.replace("1^0","1");
+		subpattern = subpattern.replace("1^1","0");
+		subpattern = subpattern.replace("0^0","0");
+		// Implied AND
+		subpattern = subpattern.replace(")(","&");
+		// Parens
+		subpattern = subpattern.replace("(0)","0");
+		subpattern = subpattern.replace("(1)","1");
+		if subpattern == fixedpattern {
+			break;
+		}
+		fixedpattern = subpattern;
+	}
+	if fixedpattern == "1" {
+		return true;
+	} else {
+		return false;
+	}
+}
+
 // Accepts a path to a log file, and writes a line to it, generating a human- and machine-readable log.
 fn logtofile(logfilename:&Path,logstring:&str,timestamp:DateTime<Local>) -> Result<(),io::Error> {
 	let userhome:PathBuf = match home_dir() {
@@ -200,19 +275,10 @@ fn log(logfilename:&Path,logstring:&str) {
 
 // Generates a single-use encryption key from a provided key size, pad file and authentication 
 // nonce, and returns the key and its associated secret seed.
-fn keygen(nonce:&[u8;8],padpath:&Path,keysize:&usize) -> Result<(Vec<u8>,Vec<u8>),io::Error> {
-	let mut padfile:fs::File = match fs::File::open(&padpath) {
-		Err(e) => return Err(e),
-		Ok(file) => file,
-	};
+fn keygen(nonce:&[u8;8],pad:&Vec<u8>,keysize:&usize) -> (Vec<u8>,Vec<u8>) {
 	// Finding the pad size this way won't work if the pad is a block device instead of a regular
 	// file. If using the otherwise-valid strategy of using a filesystemless flash device as a pad,
 	// this block will need to be extended to use a different method of detecting the pad size.
-	let padsize:u64 = match fs::metadata(&padpath) {
-		Err(e) => return Err(e),
-		Ok(metadata) => metadata.len(),
-	};
-	let mut inbin:[u8;1] = [0];
 	let mut seed:[u8;8] = [0;8];
 	let mut seednonce:[u8;8] = nonce.clone();
 	let mut newseednonce:[u8;8] = [0;8];
@@ -230,9 +296,7 @@ fn keygen(nonce:&[u8;8],padpath:&Path,keysize:&usize) -> Result<(Vec<u8>,Vec<u8>
 		}
 		sha3.finalize(&mut newseednonce);
 		seednonce = newseednonce;
-		let _ = padfile.seek(io::SeekFrom::Start(bytes_u64(&seednonce) % padsize));
-		let _ = padfile.read_exact(&mut inbin);
-		seed[x] = inbin[0];
+		seed[x] = pad[bytes_u64(&seednonce) as usize%pad.len()];
 	}
 	let mut keybytes:Vec<u8> = Vec::with_capacity(*keysize);
 	let mut keynonce:[u8;8] = seed;
@@ -249,26 +313,21 @@ fn keygen(nonce:&[u8;8],padpath:&Path,keysize:&usize) -> Result<(Vec<u8>,Vec<u8>
 		}
 		sha3.finalize(&mut newkeynonce);
 		keynonce = newkeynonce;
-		let _ = padfile.seek(io::SeekFrom::Start(bytes_u64(&keynonce) % padsize));
-		let _ = padfile.read_exact(&mut inbin);
-		keybytes.push(inbin[0]);
+		keybytes.push(pad[bytes_u64(&keynonce) as usize%pad.len()]);
 	}
-	return Ok((keybytes,seed.to_vec()));
+	return (keybytes,seed.to_vec());
 }
 
 // Depends on keygen function; generates a random nonce, produces a key, signs the message using
 // the secret seed, and returns the resulting encrypted payload (including the message,
 // signature, and nonce).
-fn encrypt(message:&Vec<u8>,padpath:&Path) -> Result<Vec<u8>,io::Error> {
+fn encrypt(message:&Vec<u8>,pad:&Vec<u8>) -> Vec<u8> {
 	let nonce:u64 = rand::random::<u64>();
 	let noncebytes:[u8;8] = u64_bytes(&nonce);
 	let keysize:usize = message.len()+8;
 	// Use the keygen function to create a key of length n + 8, where n is the length of the
 	// message to be encrypted. (The extra eight bytes are for encrypting the signature.)
-	let (keybytes,seed) = match keygen(&noncebytes,&padpath,&keysize) {
-		Ok((k,s)) => (k,s),
-		Err(e) => return Err(e),
-	};
+	let (keybytes,seed) = keygen(&noncebytes,&pad,&keysize);
 	let mut signature:[u8;8] = [0;8];
 	let mut sha3 = Keccak::new_sha3_256();
 	// Generate the signature by hashing the secret seed, the unencrypted message, and the key used
@@ -285,7 +344,7 @@ fn encrypt(message:&Vec<u8>,padpath:&Path) -> Result<Vec<u8>,io::Error> {
 		payload.push(verimessage[x] ^ keybytes[x]);
 	}
 	payload.append(&mut noncebytes.to_vec());
-	return Ok(payload);
+	return payload;
 }
 
 // Depends on keygen function; uses the nonce attached to the payload to generate the same key and
@@ -294,16 +353,13 @@ fn encrypt(message:&Vec<u8>,padpath:&Path) -> Result<Vec<u8>,io::Error> {
 // file as the one used to decrypt it; if it has been tampered with, generated with a different
 // pad, or is just random junk data, the validity check will fail and this function will return an
 // io::ErrorKind::InvalidData error.
-fn decrypt(payload:&Vec<u8>,padpath:&Path) -> Result<Vec<u8>,io::Error> {
+fn decrypt(payload:&Vec<u8>,pad:&Vec<u8>) -> (bool,Vec<u8>) {
 	let mut noncebytes:[u8;8] = [0;8];
 	// Detach the nonce from the payload, and use it to generate the key and secret seed.
 	noncebytes.copy_from_slice(&payload[payload.len()-8..payload.len()]);
 	let keysize = payload.len()-8;
 	let ciphertext:Vec<u8> = payload[0..payload.len()-8].to_vec();
-	let (keybytes,seed) = match keygen(&noncebytes,&padpath,&keysize) {
-		Ok((k,s)) => (k,s),
-		Err(e) => return Err(e),
-	};
+	let (keybytes,seed) = keygen(&noncebytes,&pad,&keysize);
 	let mut verimessage = Vec::new();
 	// Decrypt the message and signature using the key.
 	for x in 0..keysize {
@@ -315,17 +371,13 @@ fn decrypt(payload:&Vec<u8>,padpath:&Path) -> Result<Vec<u8>,io::Error> {
 	// return an io::ErrorKind::InvalidData error.
 	signature.copy_from_slice(&verimessage[verimessage.len()-8..verimessage.len()]);
 	let message:Vec<u8> = verimessage[0..verimessage.len()-8].to_vec();
-	let mut rightsum:[u8;8] = [0;8];
+	let mut truesig:[u8;8] = [0;8];
 	let mut sha3 = Keccak::new_sha3_256();
 	sha3.update(&seed);
 	sha3.update(&message);
 	sha3.update(&keybytes);
-	sha3.finalize(&mut rightsum);
-	if signature == rightsum {
-		return Ok(message);
-	} else {
-		return Err(io::Error::new(io::ErrorKind::InvalidData,"Payload signature verification failed"));
-	}
+	sha3.finalize(&mut truesig);
+	return (signature == truesig,message);
 }
 
 // Sends a vector of bytes to a specific host over a specific socket, automatically retrying in the event of certain errors
@@ -358,16 +410,10 @@ fn sendraw(listener:&UdpSocket,destaddr:&SocketAddr,payload:&Vec<u8>) -> Result<
 }
 
 // Automatically encrypts a vector of bytes and sends them over the socket.
-fn sendbytes(listener:&UdpSocket,destaddr:&SocketAddr,bytes:&Vec<u8>,padpath:&Path) -> Result<(),io::Error> {
+fn sendbytes(listener:&UdpSocket,destaddr:&SocketAddr,bytes:&Vec<u8>,pad:&Vec<u8>) -> Result<(),io::Error> {
 	let mut stampedbytes = bytes.clone();
 	stampedbytes.append(&mut i64_bytes(&Local::now().timestamp_millis()).to_vec());
-	let payload = match encrypt(&stampedbytes,&padpath) {
-		Err(why) => {
-			println!("Could not encrypt bytes - {}",why.description());
-			return Err(why);
-		},
-		Ok(b) => b,
-	};
+	let payload = encrypt(&stampedbytes,&pad); 
 	return sendraw(&listener,&destaddr,&payload);
 }
 
@@ -427,13 +473,26 @@ fn main() {
 			},
 			Ok(_) => (),
 		};
-		match fs::File::open(&padpath) {
+		// Load the entire pad file into memory. Previous versions did not do this and attempted to
+		// save memory space by accessing storage every time encryption was carried out, but the
+		// performance losses resulting from this vastly outweight saving ~10 MB of system memory.
+		// We live in a world where a chat app can take up 200 MB under normal run conditions and
+		// no one bats an eye, so I'm just going to assume that this is fine.
+		log(&logfile,&format!("Loading pad file from {}...",&padpath.display()));
+		let mut pad:Vec<u8> = Vec::new();
+		match File::open(&padpath) {
 			Err(why) => {
 				log(&logfile,&format!("Crash due to local failure to open pad file at {}: {}",&padpath.display(),&why.description()));
 				process::exit(1);
 			},
-			Ok(_) => {
-				log(&logfile,&format!("Successful initialization of pad file"));
+			Ok(mut padfile) => match padfile.read_to_end(&mut pad) {
+				Err(why) => {
+					log(&logfile,&format!("Crash due to local failure to load key data from pad file at {}: {}",&padpath.display(),&why.description()));
+					process::exit(1);
+				},
+				Ok(_) => {
+					log(&logfile,&format!("Successful load of key data from pad file"));
+				},
 			},
 		};
 		let mut inbin:[u8;500]; // recv buffer. payloads longer than 500 bytes will be truncated!
@@ -449,7 +508,7 @@ fn main() {
 			},
 		};
 		log(&logfile,&format!("Successful opening of socket on port {}",&portn));
-		match listener.set_nonblocking(true) {
+		/*match listener.set_nonblocking(true) {
 			Ok(_) => (),
 			Err(why) => {
 				// Fatal error condition #2: We can't set the UDP socket to non-blocking mode,
@@ -459,14 +518,14 @@ fn main() {
 				log(&logfile,&format!("Crash due to local failure to get non-blocking read access from the socket: {}",&why.description()));
 				process::exit(1);
 			},
-		};
+		};*/
 		// Processor loop: When the server is running nominally, this never breaks. Error
 		// conditions requiring the system to be reset (e.g. loss of connectivity) can break the
 		// loop, and execution will be caught by the recovery loop and returned to the top.
 		log(&logfile,&format!("Completion of startup sequence"));
 		let mut inqueue:VecDeque<(SocketAddr,Vec<u8>)> = VecDeque::new();
 		'processor:loop {
-			sleep(Duration::new(0,1_000_000));
+			//sleep(Duration::new(0,1_000_000));
 			inbin = [0;500];
 			match listener.recv_from(&mut inbin) {
 				Ok((nrecv,srcaddr)) => {
@@ -488,17 +547,18 @@ fn main() {
 			}; // match recvfrom
 			for sub in subscriptions.iter_mut() {
 				if sub.1.pendingack && sub.1.lastact+MAX_PACKET_DELAY*2 < Local::now().timestamp_millis() {
-					log(&logfile,&format!("Delivery failure to {}@{} [{}] [{} failures so far]",&sub.1.name,&sub.1.classes[0],&sub.0,&sub.1.deliveryfailures+1));
+					log(&logfile,&format!("Delivery failure to @{}/#{} [{}] [{} failures so far]",
+																							&sub.1.name,&sub.1.classes[0],&sub.0,&sub.1.deliveryfailures+1));
 					sub.1.deliveryfailures += 1;
 					sub.1.pendingack = false;
 				} 
 			}
 			for sub in subscriptions.clone().iter() {
 				if sub.1.deliveryfailures > MAX_DELIVERY_FAILURES {
-					log(&logfile,&format!("Termination of subscription for {}@{} [{}] for exceeding {} delivery failures",
+					log(&logfile,&format!("Termination of subscription for @{}/#{} [{}] for exceeding {} delivery failures",
 																								&sub.1.name,&sub.1.classes[0],&sub.0,&MAX_DELIVERY_FAILURES));
 					let _ = subscriptions.remove(&sub.0);
-					let _ = sendbytes(&listener,&sub.0,&vec![0x19],&padpath); // END OF MEDIUM
+					let _ = sendbytes(&listener,&sub.0,&vec![0x19],&pad); // END OF MEDIUM
 				}
 			}
 			match inqueue.pop_front() {
@@ -530,7 +590,7 @@ fn main() {
 						// validate them, and won't relay them to clients.
 						// This is not a bannable offense, because there's a chance it's due to
 						// some type of send or receive error and not an evil client.
-						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&pad); // NAK
 						if let Some(points) = banpoints.get_mut(&srcaddr.ip()) {
 							*points += 1;
 						}
@@ -539,33 +599,18 @@ fn main() {
 					// If we've come this far, it means the message is a valid payload for
 					// decryption and comes from a subscribed and authenticated sender. It's time
 					// to try decrypting it, so we can verify it for integrity and log its payload.
-					let stampedmessage:Vec<u8> = match decrypt(&recvdata,&padpath) {
-						Err(why) => match why.kind() {
-							io::ErrorKind::InvalidData => {
-								// Message decryption was attempted, but did not produce a valid
-								// signed message. This is grounds for summary deauthentication.
-								log(&logfile,&format!("Invalid packet from client at {}, subscription terminated",&srcaddr));
-								let _ = sendbytes(&listener,&srcaddr,&vec![0x19],&padpath); // END OF MEDIUM
-								let _ = subscriptions.remove(&srcaddr);
-								if let Some(points) = banpoints.get_mut(&srcaddr.ip()) {
-									*points += 1;
-								}
-								continue 'processor;
-							},
-							_ => {
-								// Message decryption failed for a reason that wasn't the sender's
-								// fault (e.g. the pad file couldn't be read). This is not a
-								// bannable or deauthenticable offense; instead, we simply notify
-								// the sender that the server is having trouble.
-								log(&logfile,&format!("Local decryption failure of packet received from {}: {}",
-																									&srcaddr,&why.description()));
-								let _ = sendbytes(&listener,&srcaddr,&vec![0x1A],&padpath); // SUBSTITUTE (server-side error)
-								continue 'processor;
-							},
-						},
-						Ok(bytes) => bytes,
-					};
+					let (datavalid,stampedmessage):(bool,Vec<u8>) = decrypt(&recvdata,&pad);
 					let message:Vec<u8> = stampedmessage[0..stampedmessage.len()-8].to_vec();
+					if !datavalid {
+						log(&logfile,&format!("Invalid packet from client at {} (contents: '{}'), subscription terminated",
+																					&srcaddr,String::from_utf8_lossy(&message)));
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x19],&pad); // END OF MEDIUM
+						let _ = subscriptions.remove(&srcaddr);
+						if let Some(points) = banpoints.get_mut(&srcaddr.ip()) {
+							*points += 1;
+						}
+						continue 'processor;
+					}
 					let mut sendername:String = String::from("unknown");
 					let mut senderclasses:Vec<String> = vec![String::from("unknown")];
 					if let Some(sub) = subscriptions.get(&srcaddr) {
@@ -582,37 +627,37 @@ fn main() {
 						// Packet timestamp more than the allowed delay into the future? This is a
 						// very weird and unlikely case, probably a clock sync error and not an
 						// attack, but we'll reject it anyway just to be on the safe side.
-						log(&logfile,&format!("Packet rejection to {}@{} [{}] due to future timestamp [{} ms]",
+						log(&logfile,&format!("Packet rejection to @{}/#{} [{}] due to future timestamp [{} ms]",
 													&sendername,&senderclasses[0],&srcaddr,&inttimestamp-&Local::now().timestamp_millis()));
-						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&pad); // NAK
 						continue 'processor;
 					} else if Local::now().timestamp_millis() > inttimestamp+MAX_PACKET_DELAY {
 						// This is the most likely situation in an actual replay attack - the
 						// timestamp is too far in the past. This means we need to reject the
 						// packet, since it could be used to confuse clients maliciously.
-						log(&logfile,&format!("Packet rejection to {}@{} [{}] due to past timestamp [{} ms]",
+						log(&logfile,&format!("Packet rejection to @{}/#{} [{}] due to past timestamp [{} ms]",
 													&sendername,&senderclasses[0],&srcaddr,&Local::now().timestamp_millis()-&inttimestamp));
-						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&pad); // NAK
 						continue 'processor;
 					}
 					// By this point, the packet is fully verified and can be retransmitted. 
 					if !subscriptions.contains_key(&srcaddr) {
 						// Let the sender know that they were subscribed if they weren't already
-						let _ = sendbytes(&listener,&srcaddr,&vec![0x02],&padpath); // START OF TEXT
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x02],&pad); // START OF TEXT
 						log(&logfile,&format!("Establishment of subscription for client at {}",&srcaddr));
 					}
 					// Insert the new subscription, or reset the sender's existing subscription 
 					// status to keep it current.
 					if let Some(sub) = subscriptions.get_mut(&srcaddr) {
 						if sub.deliveryfailures > 0 {
-							log(&logfile,&format!("Reset of delivery failure count for {}@{} [{}] from {}",
+							log(&logfile,&format!("Reset of delivery failure count for @{}/#{} [{}] from {}",
 													&sendername,&senderclasses[0],&srcaddr,&sub.deliveryfailures));
 						}
 						sub.lastact = Local::now().timestamp_millis();
 						sub.pendingack = false;
 						sub.deliveryfailures = 0;
 					}
-					if ! subscriptions.contains_key(&srcaddr) {
+					if !subscriptions.contains_key(&srcaddr) {
 						let _ = subscriptions.insert(srcaddr,
 							Subscription{
 								name:String::new(),
@@ -626,7 +671,7 @@ fn main() {
 					if message.len() == 0 {
 						// If this is an empty message, don't bother relaying it. These types of
 						// messages can be used as subscription requests.
-						let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&padpath); // START OF TEXT
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&pad); // START OF TEXT
 						continue 'processor;
 					}
 					// Payloads containing a message which is a single byte and one of the ASCII 
@@ -636,36 +681,44 @@ fn main() {
 							0x01 => { // START OF HEADING
 								// Client is telling us its semiunique name.
 								let newname:String = String::from_utf8_lossy(&message[1..message.len()].to_vec()).to_string();
+								for c in ['@','#','&','|',' ','!','^'].iter() {
+									if newname.contains(*c) {
+										log(&logfile,&format!("Client name declaration of '{}' from client at {} - invalid (contains illegal characters)",
+																																	&newname,&srcaddr));
+										let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&pad); // NAK
+										continue 'processor;
+									}
+								}
 								if let Some(sub) = subscriptions.get_mut(&srcaddr) {
 									if newname.len() > 128 {
 										log(&logfile,&format!("Client name declaration of '{}' from client at {} - invalid (too long)",&newname,&srcaddr));
-										let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
-									} else if newname.contains(" ") {
-										log(&logfile,&format!("Client name declaration of '{}' from client at {} - invalid (contains spaces)",
-																														&newname,&srcaddr));
-										let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
+										let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&pad); // NAK
 									} else {
 										log(&logfile,&format!("Client name declaration of '{}' from client at {}",&newname,&srcaddr));
 										sub.name = newname;
-										let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&padpath); // ACK
+										let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&pad); // ACK
 									} 
 								} else {
 									log(&logfile,&format!("Client name declaration of '{}' from unregistered client at {}",&newname,&srcaddr));
-									let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
+									let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&pad); // NAK
 								}
 							},
 							0x11 => { // DEVICE CONTROL ONE
 								// Client is telling us a nonunique device class by which it can be
 								// addressed.
 								let newclass:String = String::from_utf8_lossy(&message[1..message.len()].to_vec()).to_string();
+								for c in ['@','#','&','|',' ','!','^'].iter() {
+									if newclass.contains(*c) {
+										log(&logfile,&format!("Client class declaration of '{}' from client at {} - invalid (contains illegal characters)",
+																														&newclass,&srcaddr));
+										let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&pad); // NAK
+										continue 'processor;
+									}
+								}
 								if let Some(sub) = subscriptions.get_mut(&srcaddr) {
 									if newclass.len() > 128 {
 										log(&logfile,&format!("Clientclass declaration of '{}' from client at {} - invalid (too long)",&newclass,&srcaddr));
-										let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
-									} else if newclass.contains(" ") {
-										log(&logfile,&format!("Client class declaration of '{}' from client at {} - invalid (contains spaces)",
-																														&newclass,&srcaddr));
-										let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
+										let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&pad); // NAK
 									} else {
 										log(&logfile,&format!("Client class declaration of '{}' from client at {}",&newclass,&srcaddr));
 										if sub.classes == vec![String::new()] {
@@ -674,7 +727,7 @@ fn main() {
 										if !sub.classes.contains(&newclass) {
 											sub.classes.push(newclass);
 										}
-										let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&padpath); // ACK
+										let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&pad); // ACK
 									}
 								}
 							},
@@ -687,12 +740,12 @@ fn main() {
 											sub.classes.remove(n);
 										}
 									}
-									let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&padpath); // ACK
+									let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&pad); // ACK
 								} 
 							},
 							0x05 => { // ENQUIRY
 								// Client is asking us who else is on the server.
-								log(&logfile,&format!("Request for subscription list by {}@{} [{}]",&sendername,&senderclasses[0],&srcaddr));
+								log(&logfile,&format!("Request for subscription list by @{}/#{} [{}]",&sendername,&senderclasses[0],&srcaddr));
 								for sub in subscriptions.values() {
 									for class in &sub.classes {
 										let mut subline:Vec<u8> = Vec::new();
@@ -700,43 +753,49 @@ fn main() {
 										subline.append(&mut sub.name.as_bytes().to_vec());
 										subline.push(0x09);
 										subline.append(&mut class.as_bytes().to_vec());
-										let _ = sendbytes(&listener,&srcaddr,&subline,&padpath);
+										let _ = sendbytes(&listener,&srcaddr,&subline,&pad);
 									}
 								}
-								log(&logfile,&format!("Complete transmission of subscription list to {}@{} [{}]",&sendername,&senderclasses[0],&srcaddr));
+								log(&logfile,&format!("Complete transmission of subscription list to @{}/#{} [{}]",&sendername,&senderclasses[0],&srcaddr));
 							},
 							0x18 => { // CANCEL
 								// Subscription cancellation: The sender has notified us that they
 								// are no longer listening and we should stop sending them stuff.
 								// Whenever a subscription is cancelled for any reason, we send END
 								// OF MEDIUM; the client can react to this however they like. 
-								log(&logfile,&format!("Cancellation of subscription by {}@{} [{}]",&sendername,&senderclasses[0],&srcaddr));
+								log(&logfile,&format!("Cancellation of subscription by @{}/#{} [{}]",&sendername,&senderclasses[0],&srcaddr));
 								let _ = subscriptions.remove(&srcaddr);
-								let _ = sendbytes(&listener,&srcaddr,&vec![0x19],&padpath); // END OF MEDIUM
+								let _ = sendbytes(&listener,&srcaddr,&vec![0x19],&pad); // END OF MEDIUM
 							},
 							0x06 => {
 								if let Some(sub) = subscriptions.get_mut(&srcaddr) {
 									sub.pendingack = false;
 									sub.lastact = Local::now().timestamp_millis();
 								} else {
-									let _ = sendbytes(&listener,&srcaddr,&vec![0x19],&padpath); // END OF MEDIUM
+									let _ = sendbytes(&listener,&srcaddr,&vec![0x19],&pad); // END OF MEDIUM
 								}
 							},
+							0x15 => (), // client didn't like that? ok.
 							other => {
 								// Unimplemented control code? NAK response for now.
-								log(&logfile,&format!("Unknown control packet {} from {}@{} [{}]",
+								log(&logfile,&format!("Unknown control packet {} from @{}/#{} [{}]",
 																			&bytes2hex(&vec![other]),&sendername,&senderclasses[0],&srcaddr));
-								let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&padpath); // NAK
+								let _ = sendbytes(&listener,&srcaddr,&vec![0x15],&pad); // NAK
 							},
 						}; // match recvdata[0]
 						continue 'processor;
 					}
 					let stringmessage:String = String::from_utf8_lossy(&message).to_string();
-					log(&logfile,&format!("{}@{} [{}] -> {} [0x {}]",&sendername,&senderclasses[0],&srcaddr,&stringmessage,bytes2hex(&message)));
-					let mut destname:&str = "";
-					if message[0] == b'#' || message[0] == b'@' {
-						destname = stringmessage.splitn(1," ").collect::<Vec<&str>>()[0];
+					log(&logfile,&format!("@{}/#{} [{}] -> {} [0x {}]",&sendername,&senderclasses[0],&srcaddr,&stringmessage,bytes2hex(&message)));
+					let mut destpattern:&str = "";
+					if message[0] == b'>' {
+						destpattern = stringmessage.splitn(2," ").collect::<Vec<&str>>()[0].trim_left_matches('>');
+						log(&logfile,&format!("Message routing to {}",destpattern));
 					}
+					let mut relayline:Vec<u8> = format!("@{}/#{} ",&sendername,&senderclasses[0]).as_bytes().to_vec();
+					relayline.append(&mut message.clone());
+					relayline.append(&mut i64_bytes(&Local::now().timestamp_millis()).to_vec());
+					let relaypayload:Vec<u8> = encrypt(&relayline,&pad);
 					// Produce a table of subscribers other than the sender, to which to send the
 					// message.
 					let mut othersubs:HashMap<SocketAddr,Subscription> = subscriptions.clone();
@@ -745,10 +804,9 @@ fn main() {
 					'itersend:for sub in othersubs.iter() {
 						// send the message to clients with the specified name or class, or send to
 						// everyone if no name or class was specified.
-						if (destname.starts_with('#') && sub.1.classes.contains(&destname.trim_matches('#').to_owned())) ||
-							(destname.starts_with('@') && sub.1.name == destname.trim_matches('@')) || 
-							(destname == "") || (sub.1.classes.contains(&"supervisor".to_owned())) {
-							match sendraw(&listener,&sub.0,&recvdata) {
+						let subattrs:&str = &format!("@{} #{}",sub.1.name,sub.1.classes.join(" #"));
+						if wordmatch(&destpattern,&subattrs) || (sub.1.classes.contains(&"supervisor".to_owned())) {
+							match sendraw(&listener,&sub.0,&relaypayload) {
 								Err(why) => {
 									log(&logfile,&format!("Local failure to transmit packet to {}: {}",&sub.0,&why.description()));
 								},
@@ -766,11 +824,11 @@ fn main() {
 					} // 'itersend
 					log(&logfile,&format!("Retransmission to {} clients",&retransmissions));
 					if retransmissions > 0 {
-						let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&padpath); // ACK
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x06],&pad); // ACK
 					} else {
 						// If there is no one else on the server, let the client know by
 						// responding with 0x03 END OF TEXT instead of 0x06 ACK.
-						let _ = sendbytes(&listener,&srcaddr,&vec![0x03],&padpath); // END OF TEXT
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x03],&pad); // END OF TEXT
 					}
 				}, // pop Some
 				None => {
