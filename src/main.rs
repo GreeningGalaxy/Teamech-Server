@@ -95,10 +95,12 @@ use std::fs::File;
 use std::path::{Path,PathBuf};
 
 static VERSION:&str = "0.6.1 September 2018";
-static MAX_PACKET_DELAY:i64 = 5_000;	// Maximum amount of time in the past or future a packet's timestamp can be in order to validate.
-static MAX_BANNABLE_OFFENSES:u64 = 5;  // Maximum number of times a client can misstep before having their IP banned.
-static MAX_DELIVERY_FAILURES:u64 = 2;   // Maximum number of times a client can fail to respond to a delivery before being dropped.
-static LOG_DIRECTORY:&str = ".teamech-logs/server";
+static MAX_PACKET_DELAY:i64 = 5_000;				// Maximum amount of time in the past or future a packet's timestamp can be in order to validate.
+static MAX_BANNABLE_OFFENSES:u64 = 5;				// Maximum number of times a client can misstep before having their IP banned.
+static MAX_DELIVERY_FAILURES:u64 = 2;				// Maximum number of times a client can fail to respond to a delivery before being dropped.
+static LOG_DIRECTORY:&str = ".teamech-logs/server";	// Directory where logs are stored
+static LOGQUEUE_MAX_LENGTH:usize = 1024;			// Maximum length of log queue accumulation before a flush interrupting normal operation is forced.
+static ASYNC_READ_TIMEOUT:u64 = 50;					// Time in milliseconds for socket reads to time out (and allow other ops to run) in async mode.
 
 fn i64_bytes(number:&i64) -> [u8;8] {
 	let mut bytes:[u8;8] = [0;8];
@@ -476,7 +478,11 @@ fn main() {
 	// Recovery loop: if an unignorable error occurs that requires restarting, we can `break` the inner loops
 	// to wait a set delay before restarting, or `continue` the 'recovery loop to restart immediately.
 	'recovery:loop {
-		match logtofile(&logpath,&format!("[{}][{}] Opening of log file",Local::now().timestamp_millis(),Local::now().format("%Y-%m-%d %H:%M:%S%.3f"))) {
+		println!("Teamech Server {}",&VERSION);
+		println!();
+		println!("Using log file {} in ~/{}",&logpath.display(),&LOG_DIRECTORY);
+		println!();
+		match logtofile(&logpath,&format!("[{}][{}] Opening of log file.",Local::now().timestamp_millis(),Local::now().format("%Y-%m-%d %H:%M:%S%.3f"))) {
 			Err(why) => {
 				eprintln!("WARNING: Could not open log file at {} - {}. Logs are currently NOT BEING SAVED - you should fix this!",
 																								&logpath.display(),&why.description());
@@ -488,8 +494,6 @@ fn main() {
 		// performance losses resulting from this vastly outweight saving ~10 MB of system memory.
 		// We live in a world where a chat app can take up 200 MB under normal run conditions and
 		// no one bats an eye, so I'm just going to assume that this is fine.
-		println!("Teamech Server {}",&VERSION);
-		println!();
 		log(&mut logqueue,&format!("Begin loading pad file from {}...",&padpath.display()));
 		let mut pad:Vec<u8> = Vec::new();
 		match File::open(&padpath) {
@@ -521,7 +525,7 @@ fn main() {
 		};
 		log(&mut logqueue,&format!("Successful opening of socket on port {}.",&portn));
 		if !arguments.is_present("sync") {
-			match listener.set_read_timeout(Some(Duration::new(0,100_000_000))) {
+			match listener.set_read_timeout(Some(Duration::new(ASYNC_READ_TIMEOUT/1000,((ASYNC_READ_TIMEOUT as u32)%1000)*1_000_000))) {
 				Ok(_) => (),
 				Err(why) => {
 					// Fatal error condition #2: We can't set the UDP socket's timeout duration,
@@ -875,7 +879,10 @@ fn main() {
 					},
 				};
 			} // while inqueue.pop_front()
-			if arguments.is_present("sync") {
+			if arguments.is_present("sync") || logqueue.len() > LOGQUEUE_MAX_LENGTH {
+				if logqueue.len() > LOGQUEUE_MAX_LENGTH {
+					println!("Warning: Log queue has exceeded the maximum length of {}. Forcing flush to storage...",&LOGQUEUE_MAX_LENGTH);
+				}
 				let mut newlogqueue:VecDeque<String> = VecDeque::new();
 				while let Some(logline) = logqueue.pop_front() {
 					match logtofile(&logpath,&logline) {
