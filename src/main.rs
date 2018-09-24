@@ -29,14 +29,19 @@
  *	  Subscription entered. Message received decrypted and verified successfully.
  *	  Client should now send identification.
  *
- * 0x03 END OF TEXT
- *	  Sent to a client instead of ACK when that client is the only subscriber on the server when
- *	  their message was sent. Message was validated and logged, but there was no one to send it
- *	  out to.
- *
  * 0x06 ACK
- *	  Message relay acknowledge - Packet was successfully rebroadcast to other subscribers.
+ *	  Message relay acknowledge - Packet was successfully rebroadcast to other subscribers. Will be
+ *	  accompanied by two bytes which indicate the number of clients to which the message was
+ *	  relayed.
  * 
+ * 0x03 END OF TEXT
+ *	  Sent to a client instead of ACK in response to a message that consisted only of a delivery
+ *	  pattern, and had no other contents. The number accompanying it indicates how many subscribed
+ *	  clients the pattern matches. As this process involves no additional network traffic besides
+ *	  that exchanged between the querying client and the server, it can be safely used to check the
+ *	  online presence of specific clients without the network load associated with direct queries
+ *	  or requests for the full list of connected clients.
+ *
  * 0x15 NAK 
  *	  Generic refusal - Packet was invalid (e.g. bad signature or timestamp) or inappropriate
  *	  (e.g. too short to be a valid encrypted payload).
@@ -46,10 +51,44 @@
  *	  unsubscribed, and needs to re-subscribe by sending a valid encrypted payload if it wants to 
  *	  receive messages.
  * 
- * 0x1A SUBSTITUTE 
+ * 0x1A SUBSTITUTE [NI]
  *	  Server-side error notification. Client message may have been valid, but the server failed to 
  *	  process it correctly for an unrelated reason (e.g. pad file access error).
  *
+ * 0x13 DEVICE CONTROL THREE
+ *	  Response to 0x13 being sent by the client; carries a payload consisting of one of the classes
+ *	  registered to the target client. This message will be sent once for each class, and once with
+ *	  no payload to signify the end of the list.
+ *
+ * 0x05 ENQUIRY
+ *	  Response to ? being sent by the client; carries a payload containing the name and class (in
+ *	  the format `@name/#class`) of one client subscribed to the server. This message will be sent
+ *	  once for each client, and once with no payload to signify the end of the list.
+ * 
+ * Client-to-Server Special-Purpose Codes:
+ *
+ * 0x01 START OF HEADING
+ *	  Payload bytes following this code are to be entered as the sending client's unique name,
+ *	  replacing any previous name on file.
+ *
+ * 0x11 DEVICE CONTROL ONE
+ *	  Payload bytes following this code are to be entered as an additional class in the sending
+ *	  client's class list. If the class already exists in the class list, no action is necessary.
+ *
+ * 0x12 DEVICE CONTROL TWO
+ *	  Payload bytes following this code are to be removed from the sending client's class list if
+ *	  an exact match is present. If no match is present, no action is necessary.
+ * 
+ * 0x13 DEVICE CONTROL THREE
+ *	  Client requests a list of all classes currently registered to it by the server.
+ *
+ * ? QUESTION MARK
+ *	  Client requests a complete list of all subscribed clients by name and class. Note that if the
+ *	  network is large, this will be an expensive operation, and should generally only be requested 
+ *	  by human users and automated supervisors.
+ *	  Unlike the other control codes, this symbol is intended to be sent by a human operator, so it
+ *	  uses a printable character found on a keyboard instead of a non-printing control character.
+
 
 Cargo.toml:
 [package]
@@ -775,15 +814,25 @@ fn main() {
 						} 
 						continue 'processor;
 					},
+					(0x13,1) => { // DEVICE CONTROL THREE
+						// Client is requesting its own class list.
+						if let Some(sub) = subscriptions.get(&srcaddr) {
+							for class in &sub.classes {
+								let mut classvec:Vec<u8> = vec![0x13];
+								classvec.append(&mut class.as_bytes().to_vec());
+								let _ = sendbytes(&listener,&srcaddr,&classvec,&pad);
+							}
+							let _ = sendbytes(&listener,&srcaddr,&vec![0x13],&pad);
+						}
+					},
 					(b'?',1) => { // QUESTION MARK
 						// Client is asking us who else is on the server.
 						log(&mut logqueue,&format!("Request for subscription list by @{}/#{} [{}].",&sendername,&senderclasses[0],&srcaddr));
 						let mut allsubs:Vec<String> = Vec::new();
 						for sub in subscriptions.values() {
-							let mut substring:String = String::new();
-							substring.push_str(&format!("@{}/#",&sub.name));
-							substring.push_str(&sub.classes.join(" #"));
-							allsubs.push(substring);
+							for class in &sub.classes {
+								allsubs.push(format!("@{}/#{}",&sub.name,&class));
+							}
 						}
 						allsubs.sort();
 						for substring in allsubs.iter() {
@@ -792,6 +841,7 @@ fn main() {
 							let _ = sendbytes(&listener,&srcaddr,&subline,&pad);
 							log(&mut logqueue,&format!("- {}",&substring));
 						}
+						let _ = sendbytes(&listener,&srcaddr,&vec![0x05],&pad);
 						log(&mut logqueue,&format!("Complete transmission of subscription list to @{}/#{} [{}].",&sendername,&senderclasses[0],&srcaddr));
 						continue 'processor;
 					},
