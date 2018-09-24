@@ -1,6 +1,6 @@
 [package]
 name = "teamech-server"
-version = "0.5.0"
+version = "0.6.0"
 authors = ["ellie"]
 
 [dependencies]
@@ -9,3 +9,4 @@ rand = "0.3"
 dirs = "1.0.3"
 chrono = "0.4"
 byteorder = "1"
+clap = "2.32"
