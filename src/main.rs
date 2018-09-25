@@ -1,4 +1,4 @@
-/* Teamech Server v0.6.1
+/* Teamech Server v0.6.2
  * August 2018
  * License: AGPL v3.0
  *
@@ -133,7 +133,7 @@ use std::fs;
 use std::fs::File;
 use std::path::{Path,PathBuf};
 
-static VERSION:&str = "0.6.1 September 2018";
+static VERSION:&str = "0.6.2 September 2018";
 static MAX_PACKET_DELAY:i64 = 5_000;				// Maximum amount of time in the past or future a packet's timestamp can be in order to validate.
 static MAX_BANNABLE_OFFENSES:u64 = 5;				// Maximum number of times a client can misstep before having their IP banned.
 static MAX_DELIVERY_FAILURES:u64 = 2;				// Maximum number of times a client can fail to respond to a delivery before being dropped.
@@ -872,14 +872,16 @@ fn main() {
 						log(&mut logqueue,&format!("@{}/#{} [{}] -> {} [{}].",&sendername,&senderclasses[0],&srcaddr,&stringmessage,bytes2hex(&message)));
 						let mut transmit:bool = true;
 						let mut destpattern:&str = "";
-						if stringmessage.trim_matches(' ').as_bytes().to_vec()[0] == b'>' {
-							let messageparts:Vec<&str> = stringmessage.trim_matches(' ').splitn(2," ").collect::<Vec<&str>>();
-							destpattern = messageparts[0].trim_left_matches('>');
-							if messageparts.len() > 1 {
-								log(&mut logqueue,&format!("Message routing to {}.",destpattern));
-							} else {
-								log(&mut logqueue,&format!("Message testing for {}.",destpattern));
-								transmit = false;
+						if stringmessage.trim_matches(' ').len() > 0 {
+							if stringmessage.trim_matches(' ').as_bytes().to_vec()[0] == b'>' {
+								let messageparts:Vec<&str> = stringmessage.trim_matches(' ').splitn(2," ").collect::<Vec<&str>>();
+								destpattern = messageparts[0].trim_left_matches('>');
+								if messageparts.len() > 1 {
+									log(&mut logqueue,&format!("Message routing to {}.",destpattern));
+								} else {
+									log(&mut logqueue,&format!("Message testing for {}.",destpattern));
+									transmit = false;
+								}
 							}
 						}
 						let mut relayline:Vec<u8> = format!("@{}/#{} ",&sendername,&senderclasses[0]).as_bytes().to_vec();
