@@ -499,7 +499,7 @@ fn main() {
 		process::exit(1);
 	}
 
-	let logfilename:String = format!("{}-teamech-server.log",&Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+	let logfilename:String = format!("{}-teamech-server.log",&Local::now().format("%Y-%m-%dT%H:%M:%S").to_string());
 	let logpath:&Path = Path::new(&logfilename);
 	let mut logqueue:VecDeque<String> = VecDeque::new();
 	let padfilename:&str = match arguments.value_of("PADFILE") {
@@ -521,7 +521,7 @@ fn main() {
 		println!();
 		println!("Using log file {} in ~/{}",&logpath.display(),&LOG_DIRECTORY);
 		println!();
-		match logtofile(&logpath,&format!("[{}][{}] Opening of log file.",Local::now().timestamp_millis(),Local::now().format("%Y-%m-%d %H:%M:%S%.3f"))) {
+		match logtofile(&logpath,&format!("[{}][{}] Opening of log file.",Local::now().timestamp_millis(),Local::now().format("%Y-%m-%d %H:%M:%S%.6f"))) {
 			Err(why) => {
 				eprintln!("WARNING: Could not open log file at {} - {}. Logs are currently NOT BEING SAVED - you should fix this!",
 																								&logpath.display(),&why.description());

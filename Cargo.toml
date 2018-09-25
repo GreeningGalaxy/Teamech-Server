@@ -1,6 +1,6 @@
 [package]
 name = "teamech-server"
-version = "0.6.0"
+version = "0.6.1"
 authors = ["ellie"]
 
 [dependencies]
