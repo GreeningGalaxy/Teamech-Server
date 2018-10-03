@@ -1,7 +1,7 @@
 # Teamech
 ## A Simple Application Layer for the Intranet of Things
 
-## Notice: This repository is deprecated in favor of [Teamech 0.7](https://github.com/diodelass/teamech).
+## Notice: This repository is deprecated in favor of the [Teamech library](https://github.com/diodelass/teamech).
   
 ### Introduction
 For many folks who work on technology, the "Internet of Things" has become a scary term. It 
