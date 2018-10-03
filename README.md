@@ -1,5 +1,7 @@
 # Teamech
 ## A Simple Application Layer for the Intranet of Things
+
+## Notice: This repository is deprecated in favor of [Teamech 0.7](https://github.com/diodelass/teamech).
   
 ### Introduction
 For many folks who work on technology, the "Internet of Things" has become a scary term. It 
@@ -29,31 +31,24 @@ to the new client. Clients are unsubscribed when they cancel their subscription 
 acknowledge a relayed message.  
   
 ### Communication
-Whenever a client wants to send a message over a Teamech network, it simply timestamps and 
-encrypts a message of arbitrary length (between 0 and 476 characters) and sends it to the
-server. The server will then reply with a single-byte status code that indicates whether the
-packet was relayed or not, and why.  
-These status codes are as follows:  
-**0x06 ACK** - The packet was received, validated, and relayed to one or more other clients.  
-**0x02 START OF TEXT** - The packet was received and validated, and the sender has been added
-to the list of subscribed clients. Usually, this is shortly followed by 0x06 or 0x03.  
-**0x03 END OF TEXT** - The packet was received and validated, but there are no other
-subscribed clients on the server to relay it to.  
-**0x1A SUBSTITUTE** - The packet may or may not have been valid, but the server encountered an
-internal error that prevented it from being validated or relayed.  
-**0x19 END OF MEDIUM** - The packet did not validate; if the client was subscribed, they have
-been unsubscribed, and the packet was not relayed.  
-**0x15 NAK** - The packet was of inappropriate length or type, and was not processed.
-When relaying packets, the server expects to get 0x06 as a response. It will try up to three
-times to send the packet to each client before giving up. Clients which have been given up on
-five times without responding are automatically unsubscribed.  
-Messages whose content consists of a single byte of value below **0x1F** (non-printing ASCII
-control characters) are reserved for client-server messages. Currently, two of these are
-implemented:  
-**0x06 ACK** - Response to being sent a non-control message (from other clients).   
-**0x18 CANCEL** - Cancels subscription, informing the server that the client should no longer
-be sent messages from other clients.  
-  
+When clients subscribe, they may declare a unique name and any number of non-unique classes.
+Whenever a subscribed client wants to send a message over a Teamech network, it simply 
+timestamps and encrypts a message of arbitrary length (between 0 and 476 characters) and 
+sends it to the server. The message can be prefixed with a boolean expression matching other
+clients by name and class, in which case the server will relay it only to the matching clients,
+or it can be sent without a pattern, in which case it will be sent to all clients. After 
+delivering the message to all of its destinations, the server will respond to the original
+sender with an acknowledgement containing the number of clients to which the message was sent.
+Clients can also send messages containing just a pattern with no other contents, in which case
+the message will not be relayed, but the number of matching clients will still be returned. 
+This is useful for clients which need to detect if another specific client or group of clients
+is connected without asking those clients directly and generating needless network traffic.
+Clients who do not specify any name or classes will still have server-wide messages delivered
+to them, but will not be directly addressable. Clients may specify the same set of names and 
+classes, in which case they will be functionally indistinguishable, each receiving the same
+messages and appearing to the network as a single device. This is not necessarily recommended,
+but is a valid configuration.
+
 ### Security
 Teamech includes its own custom encryption scheme, Teacrypt, which is designed to be simple 
 and reasonably secure. While it should not be relied upon in cases where security is critical,
